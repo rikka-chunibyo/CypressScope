@@ -7,6 +7,10 @@
 #define APP_USB_TX_CHUNK_SIZE 64u
 #define APP_USB_TX_TIMEOUT_MS 1000u
 
+#define APP_USB_ERROR_NONE       0u
+#define APP_USB_ERROR_NO_CDC     1u
+#define APP_USB_ERROR_TX_TIMEOUT 2u
+
 #if defined(UARTDebug_TX_BUFFER_SIZE) && !defined(DebugUART_TX_BUFFER_SIZE)
 #define DebugUART_Start       UARTDebug_Start
 #define DebugUART_PutString   UARTDebug_PutString
@@ -22,6 +26,9 @@
 #endif
 
 static uint8_t usb_cdc_initialized;
+static uint8_t usb_waiting_logged;
+static uint8_t usb_cdc_init_failed_logged;
+static uint8_t usb_last_error;
 
 static const char app_usb_test_frame[] =
     "CAPTURE,BEGIN\r\n"
@@ -74,6 +81,7 @@ static uint8_t app_usb_wait_ready(void)
     AppComm_Service();
     if (usb_cdc_initialized == 0u)
     {
+        usb_last_error = APP_USB_ERROR_NO_CDC;
         return 0u;
     }
 
@@ -81,6 +89,7 @@ static uint8_t app_usb_wait_ready(void)
     {
         if (waited_ms >= APP_USB_TX_TIMEOUT_MS)
         {
+            usb_last_error = APP_USB_ERROR_TX_TIMEOUT;
             return 0u;
         }
 
@@ -90,6 +99,7 @@ static uint8_t app_usb_wait_ready(void)
         AppComm_Service();
         if (usb_cdc_initialized == 0u)
         {
+            usb_last_error = APP_USB_ERROR_NO_CDC;
             return 0u;
         }
     }
@@ -143,16 +153,28 @@ void AppComm_Service(void)
         {
             DebugUART_PutString("DBG,USB,disconnected\r\n");
         }
+        else if (usb_waiting_logged == 0u)
+        {
+            DebugUART_PutString("DBG,USB,state=waiting_for_enumeration,configuration=0\r\n");
+            usb_waiting_logged = 1u;
+        }
         usb_cdc_initialized = 0u;
+        usb_cdc_init_failed_logged = 0u;
         return;
     }
 
+    usb_waiting_logged = 0u;
     if (usb_cdc_initialized == 0u)
     {
-        if (USBUART_CDC_Init() != 0u)
+        if (USBUART_CDC_Init() == USBUART_SUCCESS)
         {
             usb_cdc_initialized = 1u;
             DebugUART_PutString("DBG,USB,cdc=ready\r\n");
+        }
+        else if (usb_cdc_init_failed_logged == 0u)
+        {
+            DebugUART_PutString("DBG,USB,state=configuration_seen,cdc_init=failed\r\n");
+            usb_cdc_init_failed_logged = 1u;
         }
     }
 }
@@ -168,7 +190,16 @@ uint8_t AppComm_SendTestFrame(void)
 
     if (result != 0u)
     {
+        usb_last_error = APP_USB_ERROR_NONE;
         DebugUART_PutString("DBG,USBTEST,send=ok\r\n");
+    }
+    else if (usb_last_error == APP_USB_ERROR_NO_CDC)
+    {
+        DebugUART_PutString("DBG,USBTEST,send=failed,reason=cdc_not_ready\r\n");
+    }
+    else if (usb_last_error == APP_USB_ERROR_TX_TIMEOUT)
+    {
+        DebugUART_PutString("DBG,USBTEST,send=failed,reason=tx_timeout\r\n");
     }
     else
     {
