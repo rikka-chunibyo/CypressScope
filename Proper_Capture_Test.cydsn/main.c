@@ -39,6 +39,8 @@
 
 #define USE_TEST_PWM        1       /* start PWM_1 (test edge generator)    */
 #define BRINGUP_TEST        1       /* run the staged hardware check first  */
+#define TIMING_DIAGNOSTICS  1
+#define RATE_TEST_WINDOW_MS 10u
 
 /* TrigEnable control bits */
 #define CTL_ARM             0x40u
@@ -148,15 +150,33 @@ static void dma_setup(void)
     UARTDebug_PutString(b);
 }
 
+static uint16_t dma_destination(uint8_t ch)
+{
+    return (uint16_t)(((uint16_t)CY_DMA_TDMEM_STRUCT_PTR[ch].TD1[3] << 8)
+                      | CY_DMA_TDMEM_STRUCT_PTR[ch].TD1[2]);
+}
+
+static uint16_t dma_last_index(uint8_t ch, const uint16_t *ring)
+{
+    uint16_t dest = dma_destination(ch);
+    uint16_t bytes = (uint16_t)(dest - LO16((uint32)ring));
+    uint16_t next  = (uint16_t)((bytes / sizeof(uint16_t)) % BUFFER_SIZE);
+    return (uint16_t)((next + BUFFER_SIZE - 1u) % BUFFER_SIZE);
+}
+
+static uint16_t ring_distance(uint16_t from, uint16_t to)
+{
+    return (uint16_t)((to + BUFFER_SIZE - from) % BUFFER_SIZE);
+}
+
 /* Index (0..BUFFER_SIZE-1) of the most recently written sample. Same
  * readback method as the reference design. Call after the DMA has stopped. */
 static uint16_t last_sample_index(uint8_t ch, const uint16_t *ring)
 {
-    uint16_t dest = (uint16_t)(((uint16_t)CY_DMA_TDMEM_STRUCT_PTR[ch].TD1[3] << 8)
-                               | CY_DMA_TDMEM_STRUCT_PTR[ch].TD1[2]);
+    uint16_t dest = dma_destination(ch);
     uint16_t bytes = (uint16_t)(dest - LO16((uint32)ring));
     uint16_t next  = (uint16_t)((bytes / sizeof(uint16_t)) % BUFFER_SIZE);
-    uint16_t last  = (uint16_t)((next + BUFFER_SIZE - 1u) % BUFFER_SIZE);
+    uint16_t last  = dma_last_index(ch, ring);
     char b[128];
 
     sprintf(b, "DBG,DMA_INDEX,ch=%u,dest=0x%04X,base=0x%04X,bytes=%u,next=%u,last=%u\r\n",
@@ -170,6 +190,37 @@ static uint16_t last_sample_index(uint8_t ch, const uint16_t *ring)
 
     return last;
 }
+
+#if TIMING_DIAGNOSTICS
+static void timing_diagnostics(void)
+{
+    char b[192];
+    uint16_t start0 = dma_last_index(ch0, ring0);
+    uint16_t start1 = dma_last_index(ch1, ring1);
+    uint16_t end0;
+    uint16_t end1;
+    uint16_t delta0;
+    uint16_t delta1;
+
+    CyDelay(RATE_TEST_WINDOW_MS);
+
+    end0 = dma_last_index(ch0, ring0);
+    end1 = dma_last_index(ch1, ring1);
+    delta0 = ring_distance(start0, end0);
+    delta1 = ring_distance(start1, end1);
+
+    sprintf(b, "DBG,RATE,window_ms=%u,ch0_start=%u,ch0_end=%u,ch0_samples=%u,ch1_start=%u,ch1_end=%u,ch1_samples=%u,expected=%lu\r\n",
+            (unsigned)RATE_TEST_WINDOW_MS,
+            (unsigned)start0,
+            (unsigned)end0,
+            (unsigned)delta0,
+            (unsigned)start1,
+            (unsigned)end1,
+            (unsigned)delta1,
+            (unsigned long)((SAMPLE_RATE_HZ * RATE_TEST_WINDOW_MS) / 1000u));
+    UARTDebug_PutString(b);
+}
+#endif
 
 
 /* ---------------- Trigger control ---------------- */
@@ -194,6 +245,12 @@ static uint8_t capture(uint16_t *last0, uint16_t *last1, uint8_t *final_status)
     uint32_t ms;
     uint8_t status;
     uint8_t previous_event_status;
+#if TIMING_DIAGNOSTICS
+    uint16_t trigger_dma_index = 0u;
+    uint16_t done_dma_index = 0u;
+    uint8_t trigger_dma_valid = 0u;
+    uint8_t done_dma_valid = 0u;
+#endif
 
     clear_latches();
     debug_status("capture-start", 0u, TrigBits_Read());
@@ -211,6 +268,22 @@ static uint8_t capture(uint16_t *last0, uint16_t *last1, uint8_t *final_status)
     for (ms = 0; ms < ARM_TIMEOUT_MS; ms++)
     {
         status = TrigBits_Read();
+
+#if TIMING_DIAGNOSTICS
+        if (((status & ST_TRIGGERED) != 0u) &&
+            ((previous_event_status & ST_TRIGGERED) == 0u))
+        {
+            trigger_dma_index = dma_last_index(ch0, ring0);
+            trigger_dma_valid = 1u;
+        }
+
+        if (((status & ST_DONE) != 0u) &&
+            ((previous_event_status & ST_DONE) == 0u))
+        {
+            done_dma_index = dma_last_index(ch0, ring0);
+            done_dma_valid = 1u;
+        }
+#endif
 
         if ((status & (ST_TRIGGERED | ST_DONE)) != previous_event_status)
         {
@@ -236,6 +309,19 @@ static uint8_t capture(uint16_t *last0, uint16_t *last1, uint8_t *final_status)
     debug_status((ms >= ARM_TIMEOUT_MS) ? "capture-timeout" : "capture-complete",
                  ms,
                  status);
+
+#if TIMING_DIAGNOSTICS
+    if (trigger_dma_valid && done_dma_valid)
+    {
+        char b[128];
+        sprintf(b, "DBG,POST_MEASURE,trigger_last=%u,done_last=%u,samples_mod_buffer=%u,expected=%u\r\n",
+                (unsigned)trigger_dma_index,
+                (unsigned)done_dma_index,
+                (unsigned)ring_distance(trigger_dma_index, done_dma_index),
+                (unsigned)POST_TRIGGER);
+        UARTDebug_PutString(b);
+    }
+#endif
 
     if (ms >= ARM_TIMEOUT_MS)
     {
@@ -425,6 +511,9 @@ int main(void)
 
     Timer_Start();      /* starts the sampling */
     UARTDebug_PutString("DBG,INIT,Timer=started\r\n");
+#if TIMING_DIAGNOSTICS
+    timing_diagnostics();
+#endif
     debug_status("init-ready", 0u, TrigBits_Read());
 
     UARTDebug_PutString("READY\r\n");
