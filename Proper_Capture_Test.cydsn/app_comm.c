@@ -1,0 +1,317 @@
+#include "project.h"
+#include "app_comm.h"
+#include <stdio.h>
+#include <string.h>
+
+#define APP_PROTOCOL_VERSION   1u
+#define APP_USB_TX_CHUNK_SIZE 64u
+#define APP_USB_TX_TIMEOUT_MS 1000u
+
+#if defined(UARTDebug_TX_BUFFER_SIZE) && !defined(DebugUART_TX_BUFFER_SIZE)
+#define DebugUART_Start       UARTDebug_Start
+#define DebugUART_PutString   UARTDebug_PutString
+#endif
+
+#if defined(UARTUSB_ENABLE_CDC_CLASS_API) && !defined(USBUART_ENABLE_CDC_CLASS_API)
+#define USBUART_5V_OPERATION      UARTUSB_5V_OPERATION
+#define USBUART_Start              UARTUSB_Start
+#define USBUART_GetConfiguration   UARTUSB_GetConfiguration
+#define USBUART_CDC_Init           UARTUSB_CDC_Init
+#define USBUART_CDCIsReady         UARTUSB_CDCIsReady
+#define USBUART_PutData            UARTUSB_PutData
+#endif
+
+static uint8_t usb_cdc_initialized;
+
+static uint8_t app_usb_wait_ready(void)
+{
+    uint32_t waited_ms = 0u;
+
+    AppComm_Service();
+    if (usb_cdc_initialized == 0u)
+    {
+        return 0u;
+    }
+
+    while (USBUART_CDCIsReady() == 0u)
+    {
+        if (waited_ms >= APP_USB_TX_TIMEOUT_MS)
+        {
+            return 0u;
+        }
+
+        CyDelay(1u);
+        waited_ms++;
+
+        AppComm_Service();
+        if (usb_cdc_initialized == 0u)
+        {
+            return 0u;
+        }
+    }
+
+    return 1u;
+}
+
+static uint8_t app_usb_send_bytes(const uint8_t *data, uint16_t length)
+{
+    uint16_t chunk;
+
+    while (length != 0u)
+    {
+        if (app_usb_wait_ready() == 0u)
+        {
+            return 0u;
+        }
+
+        chunk = (length > APP_USB_TX_CHUNK_SIZE) ? APP_USB_TX_CHUNK_SIZE : length;
+        USBUART_PutData(data, chunk);
+        data += chunk;
+        length -= chunk;
+    }
+
+    return 1u;
+}
+
+static uint8_t app_usb_send_text(const char *text)
+{
+    return app_usb_send_bytes((const uint8_t *)text, (uint16_t)strlen(text));
+}
+
+void AppComm_Init(void)
+{
+    DebugUART_Start();
+    DebugUART_PutString("START\r\n");
+    DebugUART_PutString("DBG,INIT,DebugUART=started\r\n");
+
+    USBUART_Start(0, USBUART_5V_OPERATION);
+    DebugUART_PutString("DBG,INIT,USBUART=started\r\n");
+    AppComm_Service();
+}
+
+void AppComm_Service(void)
+{
+    uint8_t configuration = USBUART_GetConfiguration();
+
+    if (configuration == 0u)
+    {
+        if (usb_cdc_initialized != 0u)
+        {
+            DebugUART_PutString("DBG,USB,disconnected\r\n");
+        }
+        usb_cdc_initialized = 0u;
+        return;
+    }
+
+    if (usb_cdc_initialized == 0u)
+    {
+        if (USBUART_CDC_Init() != 0u)
+        {
+            usb_cdc_initialized = 1u;
+            DebugUART_PutString("DBG,USB,cdc=ready\r\n");
+        }
+    }
+}
+
+void AppComm_DebugString(const char *text)
+{
+    DebugUART_PutString(text);
+}
+
+uint8_t AppComm_SendCapture(const AppCommCaptureMetadata *metadata,
+                            const uint16_t *channel0,
+                            const uint16_t *channel1)
+{
+    char buf[112];
+    uint16_t i;
+    uint16_t src;
+
+    if ((metadata == 0) || (channel0 == 0) || (channel1 == 0) ||
+        (metadata->sample_count == 0u) ||
+        (metadata->data_start_index >= metadata->sample_count))
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "DBG,OUTPUT,start=%u,last0=%u,last1=%u,trigger_index=%u,offset=%d\r\n",
+            (unsigned)metadata->data_start_index,
+            (unsigned)metadata->end_index0,
+            (unsigned)metadata->end_index1,
+            (unsigned)metadata->trigger_index,
+            (int)metadata->trigger_offset);
+    DebugUART_PutString(buf);
+
+    if (metadata->end_index0 != metadata->end_index1)
+    {
+        DebugUART_PutString("DBG,WARNING,channel_indices_differ\r\n");
+    }
+
+    if (app_usb_send_text("CAPTURE,BEGIN\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,VERSION,%u\r\n", (unsigned)APP_PROTOCOL_VERSION);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,CAPTURE_NUMBER,%lu\r\n", (unsigned long)metadata->capture_number);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    if (app_usb_send_text("META,FORMAT,CSV16_ADC_COUNTS\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    if (app_usb_send_text("META,CHANNEL_COUNT,2\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_COUNT,%u\r\n", (unsigned)metadata->sample_count);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,ADC_BITS,%u\r\n", (unsigned)metadata->adc_bits);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_CLOCK_HZ,%lu\r\n", (unsigned long)metadata->sample_clock_hz);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TIMER_PERIOD_CYCLES,%lu\r\n",
+            (unsigned long)metadata->timer_period_cycles);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_RATE_HZ,%lu\r\n", (unsigned long)metadata->sample_rate_hz);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_PERIOD_NS,%lu\r\n",
+            (unsigned long)metadata->sample_period_ns);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,PRE_TRIGGER,%u\r\n", (unsigned)metadata->pre_trigger);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,POST_TRIGGER,%u\r\n", (unsigned)metadata->post_trigger);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER_INDEX,%u\r\n", (unsigned)metadata->trigger_index);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER_OFFSET,%d\r\n", (int)metadata->trigger_offset);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER0_LEVEL,%u\r\n", (unsigned)metadata->trigger0_level);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER1_LEVEL,%u\r\n", (unsigned)metadata->trigger1_level);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,STATUS,%u\r\n", (unsigned)metadata->status);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,END_INDEX0,%u\r\n", (unsigned)metadata->end_index0);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,END_INDEX1,%u\r\n", (unsigned)metadata->end_index1);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,DATA_START_INDEX,%u\r\n",
+            (unsigned)metadata->data_start_index);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,DATA_ROWS,%u\r\n", (unsigned)metadata->sample_count);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "TRIGGER_INDEX,%u\r\n", (unsigned)metadata->trigger_index);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "IDX,%u,%u\r\n",
+            (unsigned)metadata->end_index0,
+            (unsigned)metadata->end_index1);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    if (app_usb_send_text("DATA\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    for (i = 0u; i < metadata->sample_count; i++)
+    {
+        src = (uint16_t)((metadata->data_start_index + i) % metadata->sample_count);
+        sprintf(buf, "%u,%u\r\n", (unsigned)channel0[src], (unsigned)channel1[src]);
+        if (app_usb_send_text(buf) == 0u)
+        {
+            return 0u;
+        }
+    }
+
+    if (app_usb_send_text("CAPTURE,END\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    DebugUART_PutString("DBG,OUTPUT,complete\r\n");
+    return 1u;
+}
