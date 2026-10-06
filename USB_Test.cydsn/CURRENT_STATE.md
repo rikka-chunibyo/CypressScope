@@ -16,9 +16,14 @@ Last verified: 2026-10-06
 - `features/feature.h` defines the small class-like `FeatureModule` contract: `name`, `init`, and cooperative `service` callbacks.
 - `features/feature_registry.c` selects the active module from `features/feature_config.h`.
 - `features/oscilloscope/` owns scope configuration, ADC/DMA setup, trigger control, capture timing, bring-up diagnostics, and capture output.
-- `features/usb_test/` owns the repeating USB transport test mode.
+- `features/usb/` owns the repeating USB transport mode.
 - A future logic analyzer belongs in `features/logic_analyzer/` and should implement the same module contract rather than expanding `main.c`.
 - Generated PSoC component code remains outside the feature modules and is accessed only by the feature that owns the corresponding hardware path.
+
+The selectable `FEATURE_MODE_LIVE_FEED` mode is currently implemented by the
+oscilloscope acquisition module. It uses the same ADC, timer, circular DMA,
+and trigger-gate hardware without arming the trigger. No schematic change is
+required for this first live-feed path.
 
 ## Verified USB State
 
@@ -28,7 +33,7 @@ Last verified: 2026-10-06
 - The firmware product string is `CypressScope`.
 - Windows reports `CypressScope` as the bus-reported device description, while the friendly name remains `USB Serial Device (COM10)` because Windows is using the generic `usbser.inf` CDC driver.
 - `COM8` is the separate KitProg USB-UART and is not the application USB CDC device.
-- Initial `cdc_not_ready` and `tx_timeout` messages during enumeration or port opening are expected. After the host opens the CDC port, repeated `DBG,USBTEST,send=ok` messages confirm that the application endpoint is working.
+- Initial `cdc_not_ready` and `tx_timeout` messages during enumeration or port opening are expected. After the host opens the CDC port, repeated `DBG,USB,send=ok` messages confirm that the application endpoint is working.
 - The generated USB descriptor already contains the desired product string. Future descriptor changes should be made through the PSoC Creator USB component configuration, not by editing generated files directly.
 
 ## Current Firmware Modes
@@ -37,10 +42,10 @@ Last verified: 2026-10-06
 
 - `BRINGUP_TEST = 1`
 - `TIMING_DIAGNOSTICS = 1`
-- `USB_TEST_MODE = 1`
-- `USB_TEST_INTERVAL_MS = 1000`
+- `FEATURE_MODE_USB = 1`
+- `FEATURE_USB_INTERVAL_MS = 1000`
 
-With `USB_TEST_MODE` enabled, the firmware sends a synthetic, fixed 16-row ASCII test frame once per second. This verifies USB transport, framing, and host reception; it does not benchmark maximum USB throughput and it does not contain the live 1024-sample capture.
+With `FEATURE_MODE_USB` enabled, the firmware sends a synthetic, fixed 16-row ASCII frame once per second. This verifies USB transport, framing, and host reception; it does not benchmark maximum USB throughput and it does not contain the live 1024-sample capture.
 
 The test frame intentionally reports `META,PRE_TRIGGER,8` and `META,POST_TRIGGER,8` because it contains 16 synthetic rows. Those values do not describe the real capture configuration below.
 
@@ -111,6 +116,23 @@ Current implementation details:
 - A full host command/handshake path is not implemented yet.
 - The dynamic capture sender already accepts capture metadata; the active test mode currently uses synthetic fixed data.
 
+Live-feed blocks use a binary frame so the host can keep up more easily than
+with CSV. Each frame is little-endian and has this 20-byte header:
+
+```text
+0..3   "LIVE"
+4      protocol version
+5      channel count
+6..7   sample count
+8..9   ring start index
+10..13 sequence number
+14..17 sample rate in Hz
+18..19 payload byte count
+```
+
+The payload contains `sample_count` rows of four bytes: channel 0 low/high,
+then channel 1 low/high. The current live block size is `32` samples.
+
 ## Performance Baseline
 
 At the current sample rate, storing two channels as 16-bit values produces approximately:
@@ -119,24 +141,25 @@ At the current sample rate, storing two channels as 16-bit values produces appro
 2 channels * 2 bytes * 24,024 samples/sec = 96,096 raw bytes/sec
 ```
 
-The current ASCII CSV representation requires substantially more bandwidth than the raw binary representation. The hardware capture path has kept up with the current rate in the observed tests, including an exact `750`-sample post-trigger measurement. The USB test loop only proves that the endpoint can repeatedly send the small synthetic frame; it is not a full-rate streaming test.
+The current ASCII CSV representation requires substantially more bandwidth than the raw binary representation. The hardware capture path has kept up with the current rate in the observed tests, including an exact `750`-sample post-trigger measurement. The USB loop only proves that the endpoint can repeatedly send the small synthetic frame; it is not a full-rate streaming test.
 
 The current ADC and timer limits have not been characterized by an automated rate sweep. The generated ADC headers permit an ADC clock up to 18 MHz, but the practical maximum sample rate still depends on ADC conversion timing, SOC spacing, DMA arbitration, trigger behavior, and signal quality. Treat any rate above the current `24,024 samples/sec/channel` as unvalidated until measured.
 
 ## Planned Work
 
-1. Replace ASCII capture payloads with framed binary bursts.
+1. Replace triggered ASCII capture payloads with framed binary bursts.
 2. Add a versioned `HELLO`/`INFO` handshake and explicit capture commands.
 3. Add host-side automatic device discovery using the CypressScope USB product identity, followed by protocol verification after opening the port.
 4. Add an automated sample-rate sweep that checks ADC results, DMA indices, channel alignment, trigger timing, and missed samples.
 5. Increase acquisition speed only after the sweep passes; keep ADC resolution and analog settling requirements explicit.
 6. Add a logic analyzer mode with digital threshold/edge capture, packed channel data, trigger metadata, and binary output.
-7. Add continuous or ping-pong buffering only if burst capture testing shows that it is required.
+7. Upgrade live feed to larger burst/ping-pong transfers if sustained-rate testing shows that the current ring path drops data.
 8. Update the application protocol document when the binary burst and logic analyzer formats are finalized.
 
 ## Important Caveats
 
-- `USB_TEST_MODE` must be disabled before validating live capture data through USB.
+- Set `ACTIVE_FEATURE_MODE` to `FEATURE_MODE_LIVE_FEED` to select the continuous binary stream. The current default remains the USB transport mode.
+- Live feed intentionally reports overrun counters; if USB or the host falls behind, old ring data is dropped instead of stopping acquisition.
 - The current test frame's 8-sample pre/post values are synthetic and are not a timing error.
 - Windows displaying `USB Serial Device (COM10)` is normal for the generic CDC driver and does not mean the product descriptor is missing.
 - Generated PSoC source files are useful for verifying effective settings, but component configuration should be changed in PSoC Creator.
@@ -144,14 +167,15 @@ The current ADC and timer limits have not been characterized by an automated rat
 
 ## Reference Files
 
-- `USB_Test.cydsn/main.c` - capture setup, timing metadata, diagnostics, and test-mode selection.
-- `USB_Test.cydsn/app_comm.c` - USB initialization, bounded CDC transfer, test frame, and capture framing.
+- `USB_Test.cydsn/main.c` - capture setup, timing metadata, diagnostics, and feature selection.
+- `USB_Test.cydsn/app_comm.c` - USB initialization, bounded CDC transfer, synthetic USB frame, and capture framing.
 - `USB_Test.cydsn/app_comm.h` - capture metadata structure and communication API.
 - `USB_Test.cydsn/features/feature.h` - common feature-module interface.
 - `USB_Test.cydsn/features/feature_config.h` - active feature selection.
 - `USB_Test.cydsn/features/feature_registry.c` - active feature registry.
 - `USB_Test.cydsn/features/oscilloscope/` - oscilloscope feature implementation.
-- `USB_Test.cydsn/features/usb_test/` - USB transport test implementation.
+- `USB_Test.cydsn/features/usb/` - USB transport implementation.
+- `USB_Test.cydsn/features/live_feed/README.md` - live-feed mode extension note.
 - `USB_Test.cydsn/Generated_Source/PSoC5/Timer.h` - generated timer period.
 - `USB_Test.cydsn/Generated_Source/PSoC5/ADC0.h` and `ADC1.h` - generated ADC timing settings.
 - `USB_Test.cydsn/Generated_Source/PSoC5/USBUART_descr.c` - generated USB descriptor used to verify the product string.

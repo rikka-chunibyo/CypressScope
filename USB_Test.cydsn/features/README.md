@@ -8,6 +8,8 @@ small `FeatureModule` interface:
 - private implementation details stay inside the feature directory.
 
 The active mode is selected in `feature_config.h` and resolved by
-`feature_registry.c`. Adding the logic analyzer should therefore add a
-`logic_analyzer` directory and register its module without expanding
-`main.c`.
+`feature_registry.c`. The current modes are USB, triggered oscilloscope,
+and live feed. The live feed reuses the oscilloscope acquisition implementation
+because both modes use the same ADC/DMA hardware. Adding the logic analyzer
+should add a `logic_analyzer` directory and register its module without
+expanding `main.c`.

@@ -6,6 +6,8 @@
 #define APP_PROTOCOL_VERSION   1u
 #define APP_USB_TX_CHUNK_SIZE 64u
 #define APP_USB_TX_TIMEOUT_MS 1000u
+#define APP_LIVE_FRAME_HEADER_SIZE 20u
+#define APP_LIVE_MAX_SAMPLES 64u
 
 #define APP_USB_ERROR_NONE       0u
 #define APP_USB_ERROR_NO_CDC     1u
@@ -30,7 +32,7 @@ static uint8_t usb_waiting_logged;
 static uint8_t usb_cdc_init_failed_logged;
 static uint8_t usb_last_error;
 
-static const char app_usb_test_frame[] =
+static const char app_usb_frame[] =
     "CAPTURE,BEGIN\r\n"
     "META,VERSION,1\r\n"
     "META,CAPTURE_NUMBER,0\r\n"
@@ -184,29 +186,87 @@ void AppComm_DebugString(const char *text)
     DebugUART_PutString(text);
 }
 
-uint8_t AppComm_SendTestFrame(void)
+uint8_t AppComm_SendUsbFrame(void)
 {
-    uint8_t result = app_usb_send_text(app_usb_test_frame);
+    uint8_t result = app_usb_send_text(app_usb_frame);
 
     if (result != 0u)
     {
         usb_last_error = APP_USB_ERROR_NONE;
-        DebugUART_PutString("DBG,USBTEST,send=ok\r\n");
+        DebugUART_PutString("DBG,USB,send=ok\r\n");
     }
     else if (usb_last_error == APP_USB_ERROR_NO_CDC)
     {
-        DebugUART_PutString("DBG,USBTEST,send=failed,reason=cdc_not_ready\r\n");
+        DebugUART_PutString("DBG,USB,send=failed,reason=cdc_not_ready\r\n");
     }
     else if (usb_last_error == APP_USB_ERROR_TX_TIMEOUT)
     {
-        DebugUART_PutString("DBG,USBTEST,send=failed,reason=tx_timeout\r\n");
+        DebugUART_PutString("DBG,USB,send=failed,reason=tx_timeout\r\n");
     }
     else
     {
-        DebugUART_PutString("DBG,USBTEST,send=failed\r\n");
+        DebugUART_PutString("DBG,USB,send=failed\r\n");
     }
 
     return result;
+}
+
+uint8_t AppComm_SendLiveBlock(uint32_t sequence,
+                              uint16_t start_index,
+                              uint16_t sample_count,
+                              uint32_t sample_rate_hz,
+                              const uint16_t *channel0,
+                              const uint16_t *channel1)
+{
+    uint8_t header[APP_LIVE_FRAME_HEADER_SIZE];
+    uint8_t payload[APP_LIVE_MAX_SAMPLES * 4u];
+    uint16_t payload_length;
+    uint16_t i;
+    uint16_t payload_offset = 0u;
+
+    if ((channel0 == 0) || (channel1 == 0) ||
+        (sample_count == 0u) || (sample_count > APP_LIVE_MAX_SAMPLES))
+    {
+        return 0u;
+    }
+
+    payload_length = (uint16_t)(sample_count * 4u);
+
+    header[0] = 'L';
+    header[1] = 'I';
+    header[2] = 'V';
+    header[3] = 'E';
+    header[4] = 1u;
+    header[5] = 2u;
+    header[6] = (uint8_t)(sample_count & 0x00FFu);
+    header[7] = (uint8_t)((sample_count >> 8) & 0x00FFu);
+    header[8] = (uint8_t)(start_index & 0x00FFu);
+    header[9] = (uint8_t)((start_index >> 8) & 0x00FFu);
+    header[10] = (uint8_t)(sequence & 0x000000FFUL);
+    header[11] = (uint8_t)((sequence >> 8) & 0x000000FFUL);
+    header[12] = (uint8_t)((sequence >> 16) & 0x000000FFUL);
+    header[13] = (uint8_t)((sequence >> 24) & 0x000000FFUL);
+    header[14] = (uint8_t)(sample_rate_hz & 0x000000FFUL);
+    header[15] = (uint8_t)((sample_rate_hz >> 8) & 0x000000FFUL);
+    header[16] = (uint8_t)((sample_rate_hz >> 16) & 0x000000FFUL);
+    header[17] = (uint8_t)((sample_rate_hz >> 24) & 0x000000FFUL);
+    header[18] = (uint8_t)(payload_length & 0x00FFu);
+    header[19] = (uint8_t)((payload_length >> 8) & 0x00FFu);
+
+    for (i = 0u; i < sample_count; i++)
+    {
+        payload[payload_offset++] = (uint8_t)(channel0[i] & 0x00FFu);
+        payload[payload_offset++] = (uint8_t)((channel0[i] >> 8) & 0x00FFu);
+        payload[payload_offset++] = (uint8_t)(channel1[i] & 0x00FFu);
+        payload[payload_offset++] = (uint8_t)((channel1[i] >> 8) & 0x00FFu);
+    }
+
+    if (app_usb_send_bytes(header, APP_LIVE_FRAME_HEADER_SIZE) == 0u)
+    {
+        return 0u;
+    }
+
+    return app_usb_send_bytes(payload, payload_length);
 }
 
 uint8_t AppComm_SendCapture(const AppCommCaptureMetadata *metadata,

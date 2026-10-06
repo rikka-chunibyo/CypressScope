@@ -27,7 +27,13 @@ typedef struct
 void AppComm_Init(void);
 void AppComm_Service(void);
 void AppComm_DebugString(const char *text);
-uint8_t AppComm_SendTestFrame(void);
+uint8_t AppComm_SendUsbFrame(void);
+uint8_t AppComm_SendLiveBlock(uint32_t sequence,
+                              uint16_t start_index,
+                              uint16_t sample_count,
+                              uint32_t sample_rate_hz,
+                              const uint16_t *channel0,
+                              const uint16_t *channel1);
 uint8_t AppComm_SendCapture(const AppCommCaptureMetadata *metadata,
                             const uint16_t *channel0,
                             const uint16_t *channel1);

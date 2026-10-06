@@ -34,6 +34,8 @@
 #define OSCILLOSCOPE_ST_DONE             0x08u
 
 #define OSCILLOSCOPE_PREFILL_MS          ((OSCILLOSCOPE_PRE_TRIGGER * 1000u) / OSCILLOSCOPE_SAMPLE_RATE_HZ + 10u)
+#define OSCILLOSCOPE_LIVE_BLOCK_SAMPLES  32u
+#define OSCILLOSCOPE_LIVE_STATUS_BLOCKS  100u
 
 static uint16_t oscilloscope_ring0[OSCILLOSCOPE_BUFFER_SIZE];
 static uint16_t oscilloscope_ring1[OSCILLOSCOPE_BUFFER_SIZE];
@@ -43,6 +45,14 @@ static uint8_t oscilloscope_dma_ch1;
 static uint8_t oscilloscope_dma_td0;
 static uint8_t oscilloscope_dma_td1;
 static uint32_t oscilloscope_capture_number;
+static uint16_t oscilloscope_live_block0[OSCILLOSCOPE_LIVE_BLOCK_SAMPLES];
+static uint16_t oscilloscope_live_block1[OSCILLOSCOPE_LIVE_BLOCK_SAMPLES];
+static uint16_t oscilloscope_live_next_index;
+static uint32_t oscilloscope_live_sequence;
+static uint32_t oscilloscope_live_blocks_sent;
+static uint32_t oscilloscope_live_overruns;
+static uint32_t oscilloscope_live_copy_failures;
+static uint32_t oscilloscope_live_send_failures;
 
 static void oscilloscope_debug_status(const char *stage, uint32_t elapsed_ms, uint8_t status)
 {
@@ -71,7 +81,7 @@ void Oscilloscope_ReportConfig(void)
 {
     char b[256];
 
-    sprintf(b, "DBG,CONFIG,feature=oscilloscope,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u,usb_test=%u,usb_test_interval_ms=%u\r\n",
+    sprintf(b, "DBG,CONFIG,feature=oscilloscope,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u,usb=%u,usb_interval_ms=%u\r\n",
             (unsigned)OSCILLOSCOPE_BUFFER_SIZE,
             (unsigned)OSCILLOSCOPE_POST_TRIGGER,
             (unsigned)OSCILLOSCOPE_PRE_TRIGGER,
@@ -86,8 +96,8 @@ void Oscilloscope_ReportConfig(void)
             (unsigned)OSCILLOSCOPE_TRIGGER1_LEVEL,
             (unsigned)OSCILLOSCOPE_USE_TEST_PWM,
             (unsigned)OSCILLOSCOPE_BRINGUP_TEST,
-            (unsigned)(ACTIVE_FEATURE_MODE == FEATURE_MODE_USB_TEST),
-            (unsigned)FEATURE_USB_TEST_INTERVAL_MS);
+            (unsigned)(ACTIVE_FEATURE_MODE == FEATURE_MODE_USB),
+            (unsigned)FEATURE_USB_INTERVAL_MS);
     AppComm_DebugString(b);
 }
 
@@ -419,7 +429,7 @@ static void oscilloscope_bringup(void)
 }
 #endif
 
-static void oscilloscope_init(void)
+static void oscilloscope_initialize_hardware(uint8_t live_mode)
 {
     char dbg[160];
 
@@ -454,6 +464,11 @@ static void oscilloscope_init(void)
             (unsigned)OSCILLOSCOPE_POST_TRIGGER);
     AppComm_DebugString(dbg);
 
+    if (live_mode != 0u)
+    {
+        oscilloscope_clear_latches();
+    }
+
     oscilloscope_dma_setup();
 
     Timer_Start();
@@ -463,12 +478,128 @@ static void oscilloscope_init(void)
     oscilloscope_timing_diagnostics();
 #endif
 
-    oscilloscope_debug_status("init-ready", 0u, TrigBits_Read());
+    if (live_mode != 0u)
+    {
+        sprintf(dbg, "DBG,INIT,mode=live_feed,block=%u,buffer=%u\r\n",
+                (unsigned)OSCILLOSCOPE_LIVE_BLOCK_SAMPLES,
+                (unsigned)OSCILLOSCOPE_BUFFER_SIZE);
+        AppComm_DebugString(dbg);
+        oscilloscope_debug_status("live-ready", 0u, TrigBits_Read());
+    }
+    else
+    {
+        oscilloscope_debug_status("init-ready", 0u, TrigBits_Read());
+    }
     AppComm_DebugString("READY\r\n");
 
+    if (live_mode == 0u)
+    {
 #if OSCILLOSCOPE_BRINGUP_TEST
-    oscilloscope_bringup();
+        oscilloscope_bringup();
 #endif
+    }
+}
+
+static void oscilloscope_init(void)
+{
+    oscilloscope_initialize_hardware(0u);
+}
+
+static uint8_t oscilloscope_copy_live_block(uint16_t start_index, uint16_t sample_count)
+{
+    uint16_t before0 = oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0);
+    uint16_t before1 = oscilloscope_dma_last_index(oscilloscope_dma_ch1, oscilloscope_ring1);
+    uint16_t i;
+
+    for (i = 0u; i < sample_count; i++)
+    {
+        uint16_t source_index = (uint16_t)((start_index + i) % OSCILLOSCOPE_BUFFER_SIZE);
+        oscilloscope_live_block0[i] = oscilloscope_ring0[source_index];
+        oscilloscope_live_block1[i] = oscilloscope_ring1[source_index];
+    }
+
+    return (uint8_t)((before0 == oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0)) &&
+                     (before1 == oscilloscope_dma_last_index(oscilloscope_dma_ch1, oscilloscope_ring1)));
+}
+
+static void oscilloscope_live_init(void)
+{
+    uint16_t last0;
+
+    oscilloscope_live_sequence = 0u;
+    oscilloscope_live_blocks_sent = 0u;
+    oscilloscope_live_overruns = 0u;
+    oscilloscope_live_copy_failures = 0u;
+    oscilloscope_live_send_failures = 0u;
+
+    oscilloscope_initialize_hardware(1u);
+    last0 = oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0);
+    oscilloscope_live_next_index = (uint16_t)((last0 + 1u) % OSCILLOSCOPE_BUFFER_SIZE);
+}
+
+static void oscilloscope_live_service(void)
+{
+    uint16_t last0 = oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0);
+    uint16_t last1 = oscilloscope_dma_last_index(oscilloscope_dma_ch1, oscilloscope_ring1);
+    uint16_t write_index;
+    uint16_t available;
+    char b[160];
+
+    if (last0 != last1)
+    {
+        return;
+    }
+
+    write_index = (uint16_t)((last0 + 1u) % OSCILLOSCOPE_BUFFER_SIZE);
+    available = oscilloscope_ring_distance(oscilloscope_live_next_index, write_index);
+
+    if (available > (OSCILLOSCOPE_BUFFER_SIZE - OSCILLOSCOPE_LIVE_BLOCK_SAMPLES))
+    {
+        oscilloscope_live_overruns++;
+        oscilloscope_live_next_index = (uint16_t)((write_index + OSCILLOSCOPE_BUFFER_SIZE -
+                                                   OSCILLOSCOPE_LIVE_BLOCK_SAMPLES) %
+                                                  OSCILLOSCOPE_BUFFER_SIZE);
+        available = OSCILLOSCOPE_LIVE_BLOCK_SAMPLES;
+    }
+
+    if (available < OSCILLOSCOPE_LIVE_BLOCK_SAMPLES)
+    {
+        return;
+    }
+
+    if (oscilloscope_copy_live_block(oscilloscope_live_next_index,
+                                     OSCILLOSCOPE_LIVE_BLOCK_SAMPLES) == 0u)
+    {
+        oscilloscope_live_copy_failures++;
+        return;
+    }
+
+    if (AppComm_SendLiveBlock(oscilloscope_live_sequence,
+                              oscilloscope_live_next_index,
+                              OSCILLOSCOPE_LIVE_BLOCK_SAMPLES,
+                              OSCILLOSCOPE_SAMPLE_RATE_HZ,
+                              oscilloscope_live_block0,
+                              oscilloscope_live_block1) == 0u)
+    {
+        oscilloscope_live_send_failures++;
+        return;
+    }
+
+    oscilloscope_live_sequence++;
+    oscilloscope_live_blocks_sent++;
+    oscilloscope_live_next_index = (uint16_t)((oscilloscope_live_next_index +
+                                               OSCILLOSCOPE_LIVE_BLOCK_SAMPLES) %
+                                              OSCILLOSCOPE_BUFFER_SIZE);
+
+    if ((oscilloscope_live_blocks_sent % OSCILLOSCOPE_LIVE_STATUS_BLOCKS) == 0u)
+    {
+        sprintf(b, "DBG,LIVE,blocks=%lu,overruns=%lu,copy_failures=%lu,send_failures=%lu\r\n",
+                (unsigned long)oscilloscope_live_blocks_sent,
+                (unsigned long)oscilloscope_live_overruns,
+                (unsigned long)oscilloscope_live_copy_failures,
+                (unsigned long)oscilloscope_live_send_failures);
+        AppComm_DebugString(b);
+    }
 }
 
 static void oscilloscope_service(void)
@@ -517,6 +648,18 @@ const FeatureModule *Oscilloscope_GetModule(void)
         "oscilloscope",
         oscilloscope_init,
         oscilloscope_service
+    };
+
+    return &module;
+}
+
+const FeatureModule *Oscilloscope_GetLiveModule(void)
+{
+    static const FeatureModule module =
+    {
+        "live_feed",
+        oscilloscope_live_init,
+        oscilloscope_live_service
     };
 
     return &module;
