@@ -44,6 +44,7 @@ static uint8_t oscilloscope_dma_ch0;
 static uint8_t oscilloscope_dma_ch1;
 static uint8_t oscilloscope_dma_td0;
 static uint8_t oscilloscope_dma_td1;
+static uint8_t oscilloscope_dma_configured;
 static uint32_t oscilloscope_capture_number;
 static uint16_t oscilloscope_live_block0[OSCILLOSCOPE_LIVE_BLOCK_SAMPLES];
 static uint16_t oscilloscope_live_block1[OSCILLOSCOPE_LIVE_BLOCK_SAMPLES];
@@ -81,7 +82,7 @@ void Oscilloscope_ReportConfig(void)
 {
     char b[256];
 
-    sprintf(b, "DBG,CONFIG,feature=oscilloscope,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u,usb=%u,usb_interval_ms=%u\r\n",
+    sprintf(b, "DBG,CONFIG,feature=oscilloscope,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u,usb_interval_ms=%u\r\n",
             (unsigned)OSCILLOSCOPE_BUFFER_SIZE,
             (unsigned)OSCILLOSCOPE_POST_TRIGGER,
             (unsigned)OSCILLOSCOPE_PRE_TRIGGER,
@@ -96,7 +97,6 @@ void Oscilloscope_ReportConfig(void)
             (unsigned)OSCILLOSCOPE_TRIGGER1_LEVEL,
             (unsigned)OSCILLOSCOPE_USE_TEST_PWM,
             (unsigned)OSCILLOSCOPE_BRINGUP_TEST,
-            (unsigned)(ACTIVE_FEATURE_MODE == FEATURE_MODE_USB),
             (unsigned)FEATURE_USB_INTERVAL_MS);
     AppComm_DebugString(b);
 }
@@ -107,28 +107,34 @@ static void oscilloscope_dma_setup(void)
 
     AppComm_DebugString("DBG,DMA,begin\r\n");
 
-    oscilloscope_dma_ch0 = DMA0_DmaInitialize(2, 1, HI16(CYDEV_PERIPH_BASE), HI16(CYDEV_SRAM_BASE));
-    oscilloscope_dma_ch1 = DMA1_DmaInitialize(2, 1, HI16(CYDEV_PERIPH_BASE), HI16(CYDEV_SRAM_BASE));
+    if (oscilloscope_dma_configured == 0u)
+    {
+        oscilloscope_dma_ch0 = DMA0_DmaInitialize(2, 1, HI16(CYDEV_PERIPH_BASE), HI16(CYDEV_SRAM_BASE));
+        oscilloscope_dma_ch1 = DMA1_DmaInitialize(2, 1, HI16(CYDEV_PERIPH_BASE), HI16(CYDEV_SRAM_BASE));
 
-    oscilloscope_dma_td0 = CyDmaTdAllocate();
-    oscilloscope_dma_td1 = CyDmaTdAllocate();
+        oscilloscope_dma_td0 = CyDmaTdAllocate();
+        oscilloscope_dma_td1 = CyDmaTdAllocate();
 
-    CyDmaTdSetConfiguration(oscilloscope_dma_td0,
-                            OSCILLOSCOPE_BUFFER_SIZE * sizeof(uint16_t),
-                            oscilloscope_dma_td0,
-                            CY_DMA_TD_INC_DST_ADR);
-    CyDmaTdSetAddress(oscilloscope_dma_td0,
-                      LO16((uint32)ADC0_SAR_WRK0_PTR),
-                      LO16((uint32)oscilloscope_ring0));
+        CyDmaTdSetConfiguration(oscilloscope_dma_td0,
+                                OSCILLOSCOPE_BUFFER_SIZE * sizeof(uint16_t),
+                                oscilloscope_dma_td0,
+                                CY_DMA_TD_INC_DST_ADR);
+        CyDmaTdSetAddress(oscilloscope_dma_td0,
+                          LO16((uint32)ADC0_SAR_WRK0_PTR),
+                          LO16((uint32)oscilloscope_ring0));
+
+        CyDmaTdSetConfiguration(oscilloscope_dma_td1,
+                                OSCILLOSCOPE_BUFFER_SIZE * sizeof(uint16_t),
+                                oscilloscope_dma_td1,
+                                CY_DMA_TD_INC_DST_ADR);
+        CyDmaTdSetAddress(oscilloscope_dma_td1,
+                          LO16((uint32)ADC1_SAR_WRK0_PTR),
+                          LO16((uint32)oscilloscope_ring1));
+
+        oscilloscope_dma_configured = 1u;
+    }
+
     CyDmaChSetInitialTd(oscilloscope_dma_ch0, oscilloscope_dma_td0);
-
-    CyDmaTdSetConfiguration(oscilloscope_dma_td1,
-                            OSCILLOSCOPE_BUFFER_SIZE * sizeof(uint16_t),
-                            oscilloscope_dma_td1,
-                            CY_DMA_TD_INC_DST_ADR);
-    CyDmaTdSetAddress(oscilloscope_dma_td1,
-                      LO16((uint32)ADC1_SAR_WRK0_PTR),
-                      LO16((uint32)oscilloscope_ring1));
     CyDmaChSetInitialTd(oscilloscope_dma_ch1, oscilloscope_dma_td1);
 
     CyDmaChEnable(oscilloscope_dma_ch0, 1);
@@ -641,12 +647,32 @@ static void oscilloscope_service(void)
     CyDelay(500);
 }
 
+static void oscilloscope_stop(void)
+{
+    TrigEnable_Write(0u);
+    Timer_Stop();
+    CyDmaChDisable(oscilloscope_dma_ch0);
+    CyDmaChDisable(oscilloscope_dma_ch1);
+    PWM_Sample_Buffer_Stop();
+    TriggerCMP0_Stop();
+    TriggerCMP1_Stop();
+    TriggerDAC0_Stop();
+    TriggerDAC1_Stop();
+    ADC0_Stop();
+    ADC1_Stop();
+#if OSCILLOSCOPE_USE_TEST_PWM
+    PWM_1_Stop();
+#endif
+    AppComm_DebugString("DBG,FEATURE,stopped=oscilloscope\r\n");
+}
+
 const FeatureModule *Oscilloscope_GetModule(void)
 {
     static const FeatureModule module =
     {
         "oscilloscope",
         oscilloscope_init,
+        oscilloscope_stop,
         oscilloscope_service
     };
 
@@ -659,6 +685,7 @@ const FeatureModule *Oscilloscope_GetLiveModule(void)
     {
         "live_feed",
         oscilloscope_live_init,
+        oscilloscope_stop,
         oscilloscope_live_service
     };
 

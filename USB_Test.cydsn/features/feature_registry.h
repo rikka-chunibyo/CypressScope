@@ -3,6 +3,6 @@
 
 #include "feature.h"
 
-const FeatureModule *FeatureRegistry_GetActive(void);
+const FeatureModule *FeatureRegistry_Get(FeatureMode mode);
 
 #endif

@@ -13,8 +13,9 @@ Last verified: 2026-10-06
 ## Feature Architecture
 
 - `main.c` is now only the composition root: it enables interrupts, initializes communication, selects the active feature, and runs the common service loop.
-- `features/feature.h` defines the small class-like `FeatureModule` contract: `name`, `init`, and cooperative `service` callbacks.
-- `features/feature_registry.c` selects the active module from `features/feature_config.h`.
+- `features/feature.h` defines the runtime `FeatureMode` identifiers and the small class-like `FeatureModule` contract: `name`, `init`, `stop`, and cooperative `service` callbacks.
+- `features/feature_registry.c` maps runtime `FeatureMode` values to feature modules.
+- `FeatureMode` values are runtime protocol identifiers in `features/feature.h`; the firmware starts in USB mode and can switch modes through USB commands.
 - `features/oscilloscope/` owns scope configuration, ADC/DMA setup, trigger control, capture timing, bring-up diagnostics, and capture output.
 - `features/usb/` owns the repeating USB transport mode.
 - A future logic analyzer belongs in `features/logic_analyzer/` and should implement the same module contract rather than expanding `main.c`.
@@ -35,6 +36,7 @@ required for this first live-feed path.
 - `COM8` is the separate KitProg USB-UART and is not the application USB CDC device.
 - Initial `cdc_not_ready` and `tx_timeout` messages during enumeration or port opening are expected. After the host opens the CDC port, repeated `DBG,USB,send=ok` messages confirm that the application endpoint is working.
 - The generated USB descriptor already contains the desired product string. Future descriptor changes should be made through the PSoC Creator USB component configuration, not by editing generated files directly.
+- Send `MODE LIVE`, `MODE USB`, or `MODE SCOPE` followed by CR/LF to change the active feature without rebuilding firmware.
 
 ## Current Firmware Modes
 
@@ -45,7 +47,7 @@ required for this first live-feed path.
 - `FEATURE_MODE_USB = 1`
 - `FEATURE_USB_INTERVAL_MS = 1000`
 
-With `FEATURE_MODE_USB` enabled, the firmware sends a synthetic, fixed 16-row ASCII frame once per second. This verifies USB transport, framing, and host reception; it does not benchmark maximum USB throughput and it does not contain the live 1024-sample capture.
+With USB mode selected, the firmware sends a synthetic, fixed 16-row ASCII frame once per second. This verifies USB transport, framing, and host reception; it does not benchmark maximum USB throughput and it does not contain the live 1024-sample capture.
 
 The test frame intentionally reports `META,PRE_TRIGGER,8` and `META,POST_TRIGGER,8` because it contains 16 synthetic rows. Those values do not describe the real capture configuration below.
 
@@ -158,7 +160,8 @@ The current ADC and timer limits have not been characterized by an automated rat
 
 ## Important Caveats
 
-- Set `ACTIVE_FEATURE_MODE` to `FEATURE_MODE_LIVE_FEED` to select the continuous binary stream. The current default remains the USB transport mode.
+- The firmware starts in USB mode; send `MODE LIVE` to select the continuous binary stream and `MODE SCOPE` to select triggered capture.
+- `LIVE` output is binary, not terminal text: the four-byte magic is followed by a 20-byte little-endian header and raw 16-bit channel samples. A terminal will display the payload as replacement characters.
 - Live feed intentionally reports overrun counters; if USB or the host falls behind, old ring data is dropped instead of stopping acquisition.
 - The current test frame's 8-sample pre/post values are synthetic and are not a timing error.
 - Windows displaying `USB Serial Device (COM10)` is normal for the generic CDC driver and does not mean the product descriptor is missing.

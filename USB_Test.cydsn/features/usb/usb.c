@@ -17,12 +17,17 @@ static void usb_service(void)
     CyDelay(FEATURE_USB_INTERVAL_MS);
 }
 
+static void usb_stop(void)
+{
+}
+
 const FeatureModule *Usb_GetModule(void)
 {
     static const FeatureModule module =
     {
         "usb",
         usb_init,
+        usb_stop,
         usb_service
     };
 

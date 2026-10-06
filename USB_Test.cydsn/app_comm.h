@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "features/feature.h"
+
 typedef struct
 {
     uint32_t capture_number;
@@ -26,6 +28,7 @@ typedef struct
 
 void AppComm_Init(void);
 void AppComm_Service(void);
+uint8_t AppComm_TakeModeRequest(FeatureMode *mode);
 void AppComm_DebugString(const char *text);
 uint8_t AppComm_SendUsbFrame(void);
 uint8_t AppComm_SendLiveBlock(uint32_t sequence,

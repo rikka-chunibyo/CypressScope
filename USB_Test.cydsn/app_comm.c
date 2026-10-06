@@ -8,6 +8,8 @@
 #define APP_USB_TX_TIMEOUT_MS 1000u
 #define APP_LIVE_FRAME_HEADER_SIZE 20u
 #define APP_LIVE_MAX_SAMPLES 64u
+#define APP_COMMAND_BUFFER_SIZE    32u
+#define APP_COMMAND_PACKET_SIZE    64u
 
 #define APP_USB_ERROR_NONE       0u
 #define APP_USB_ERROR_NO_CDC     1u
@@ -31,6 +33,11 @@ static uint8_t usb_cdc_initialized;
 static uint8_t usb_waiting_logged;
 static uint8_t usb_cdc_init_failed_logged;
 static uint8_t usb_last_error;
+static char app_command_buffer[APP_COMMAND_BUFFER_SIZE];
+static uint8_t app_command_length;
+static uint8_t app_command_discard;
+static uint8_t app_mode_request_pending;
+static FeatureMode app_requested_mode;
 
 static const char app_usb_frame[] =
     "CAPTURE,BEGIN\r\n"
@@ -134,6 +141,87 @@ static uint8_t app_usb_send_text(const char *text)
     return app_usb_send_bytes((const uint8_t *)text, (uint16_t)strlen(text));
 }
 
+static void app_command_uppercase(char *command)
+{
+    uint8_t i;
+
+    for (i = 0u; command[i] != '\0'; i++)
+    {
+        if ((command[i] >= 'a') && (command[i] <= 'z'))
+        {
+            command[i] = (char)(command[i] - ('a' - 'A'));
+        }
+    }
+}
+
+static void app_command_process(void)
+{
+    app_command_buffer[app_command_length] = '\0';
+    app_command_uppercase(app_command_buffer);
+
+    if (strcmp(app_command_buffer, "MODE USB") == 0)
+    {
+        app_requested_mode = FEATURE_MODE_USB;
+        app_mode_request_pending = 1u;
+        DebugUART_PutString("DBG,COMMAND,mode=usb\r\n");
+    }
+    else if (strcmp(app_command_buffer, "MODE LIVE") == 0)
+    {
+        app_requested_mode = FEATURE_MODE_LIVE_FEED;
+        app_mode_request_pending = 1u;
+        DebugUART_PutString("DBG,COMMAND,mode=live_feed\r\n");
+    }
+    else if ((strcmp(app_command_buffer, "MODE SCOPE") == 0) ||
+             (strcmp(app_command_buffer, "MODE OSCILLOSCOPE") == 0))
+    {
+        app_requested_mode = FEATURE_MODE_OSCILLOSCOPE;
+        app_mode_request_pending = 1u;
+        DebugUART_PutString("DBG,COMMAND,mode=oscilloscope\r\n");
+    }
+    else
+    {
+        DebugUART_PutString("DBG,COMMAND,unknown\r\n");
+    }
+}
+
+static void app_command_receive(void)
+{
+    uint8_t packet[APP_COMMAND_PACKET_SIZE];
+    uint8_t received;
+    uint8_t i;
+
+    if (USBUART_DataIsReady() == 0u)
+    {
+        return;
+    }
+
+    received = USBUART_GetAll(packet);
+    for (i = 0u; i < received; i++)
+    {
+        if ((packet[i] == '\r') || (packet[i] == '\n'))
+        {
+            if ((app_command_discard == 0u) && (app_command_length != 0u))
+            {
+                app_command_process();
+            }
+            app_command_length = 0u;
+            app_command_discard = 0u;
+        }
+        else if ((packet[i] >= 0x20u) && (packet[i] <= 0x7Eu))
+        {
+            if ((app_command_discard == 0u) &&
+                (app_command_length < (APP_COMMAND_BUFFER_SIZE - 1u)))
+            {
+                app_command_buffer[app_command_length++] = (char)packet[i];
+            }
+            else
+            {
+                app_command_discard = 1u;
+            }
+        }
+    }
+}
+
 void AppComm_Init(void)
 {
     DebugUART_Start();
@@ -179,6 +267,23 @@ void AppComm_Service(void)
             usb_cdc_init_failed_logged = 1u;
         }
     }
+
+    if (usb_cdc_initialized != 0u)
+    {
+        app_command_receive();
+    }
+}
+
+uint8_t AppComm_TakeModeRequest(FeatureMode *mode)
+{
+    if ((mode == 0) || (app_mode_request_pending == 0u))
+    {
+        return 0u;
+    }
+
+    *mode = app_requested_mode;
+    app_mode_request_pending = 0u;
+    return 1u;
 }
 
 void AppComm_DebugString(const char *text)
