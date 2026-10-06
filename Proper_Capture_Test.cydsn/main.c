@@ -66,9 +66,9 @@ static uint8_t td0, td1;
 
 static void debug_status(const char *stage, uint32_t elapsed_ms, uint8_t status)
 {
-    char b[128];
+    char b[256];
 
-    sprintf(b, "DBG,STATUS,stage=%s,ms=%lu,ctl=0x%02X,sr=0x%02X,cmp0=%u,cmp1=%u,trig=%u,done=%u\r\n",
+    sprintf(b, "DBG,STATUS,stage=%s,ms=%lu,ctl=0x%02X,sr=0x%02X,cmp0=%u,cmp1=%u,trig=%u,done=%u,cmp0_direct=%u,cmp1_direct=%u,testedge_pin=%u,adc0_raw=%d,adc1_raw=%d,pwm_period=%u,pwm_compare=%u\r\n",
             stage,
             (unsigned long)elapsed_ms,
             (unsigned)TrigEnable_Read(),
@@ -76,7 +76,14 @@ static void debug_status(const char *stage, uint32_t elapsed_ms, uint8_t status)
             (unsigned)((status & ST_CMP0) != 0u),
             (unsigned)((status & ST_CMP1) != 0u),
             (unsigned)((status & ST_TRIGGERED) != 0u),
-            (unsigned)((status & ST_DONE) != 0u));
+            (unsigned)((status & ST_DONE) != 0u),
+            (unsigned)(TriggerCMP0_GetCompare() != 0u),
+            (unsigned)(TriggerCMP1_GetCompare() != 0u),
+            (unsigned)TestEdge_Read(),
+            (int)ADC0_GetResult16(),
+            (int)ADC1_GetResult16(),
+            (unsigned)PWM_1_ReadPeriod(),
+            (unsigned)PWM_1_ReadCompare());
     UARTDebug_PutString(b);
 }
 
