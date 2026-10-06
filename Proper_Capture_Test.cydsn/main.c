@@ -1,12 +1,14 @@
 #include "project.h"
 #include <stdio.h>
+#include <string.h>
 
 /* Hardware-gated capture.
  *
  * Schematic instance names this file expects:
  *   Timer (free-running sample tick -> ADC soc), ADC0, ADC1, DMA0, DMA1,
  *   TriggerDAC0/1, TriggerCMP0/1, TrigEnable (Control Reg),
- *   TrigBits (Status Reg), PWM_Sample_Buffer, UARTDebug (UART),
+ *   TrigBits (Status Reg), PWM_Sample_Buffer, DebugUART (debug UART),
+ *   USBUART (USB CDC app link),
  *   PWM_1 (optional test-edge generator).
  *
  * Control bits (TrigEnable):  control_6 = arm, control_7 = clear all
@@ -26,7 +28,10 @@
 #define POST_TRIGGER        750u    /* samples kept after the trigger        */
 #define PRE_TRIGGER         (BUFFER_SIZE - POST_TRIGGER)
 
-#define SAMPLE_RATE_HZ      24024u   /* 24 MHz BUS_CLK / 999 timer clocks */
+#define SAMPLE_CLOCK_HZ     ((uint32)BCLK__BUS_CLK__HZ)
+#define TIMER_PERIOD_CYCLES ((uint32)(Timer_INIT_PERIOD + 1u))
+#define SAMPLE_RATE_HZ      (SAMPLE_CLOCK_HZ / TIMER_PERIOD_CYCLES)
+#define SAMPLE_PERIOD_NS    ((TIMER_PERIOD_CYCLES * 1000UL) / BCLK__BUS_CLK__MHZ)
 
 #define TRIGGER0_LEVEL      156u    /* VDAC code, 16 mV per code (156 = 2.5 V) */
 #define TRIGGER1_LEVEL      156u
@@ -41,6 +46,25 @@
 #define BRINGUP_TEST        1       /* run the staged hardware check first  */
 #define TIMING_DIAGNOSTICS  1
 #define RATE_TEST_WINDOW_MS 10u
+
+#define ADC_BITS                  12u
+#define APP_PROTOCOL_VERSION      1u
+#define APP_USB_TX_CHUNK_SIZE    64u
+#define APP_USB_TX_TIMEOUT_MS  1000u
+
+#if defined(UARTDebug_TX_BUFFER_SIZE) && !defined(DebugUART_TX_BUFFER_SIZE)
+#define DebugUART_Start       UARTDebug_Start
+#define DebugUART_PutString   UARTDebug_PutString
+#endif
+
+#if defined(UARTUSB_ENABLE_CDC_CLASS_API) && !defined(USBUART_ENABLE_CDC_CLASS_API)
+#define USBUART_5V_OPERATION      UARTUSB_5V_OPERATION
+#define USBUART_Start              UARTUSB_Start
+#define USBUART_GetConfiguration   UARTUSB_GetConfiguration
+#define USBUART_CDC_Init           UARTUSB_CDC_Init
+#define USBUART_CDCIsReady         UARTUSB_CDCIsReady
+#define USBUART_PutData            UARTUSB_PutData
+#endif
 
 /* TrigEnable control bits */
 #define CTL_ARM             0x40u
@@ -86,18 +110,21 @@ static void debug_status(const char *stage, uint32_t elapsed_ms, uint8_t status)
             (int)ADC1_GetResult16(),
             (unsigned)PWM_1_ReadPeriod(),
             (unsigned)PWM_1_ReadCompare());
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 }
 
 static void debug_config(void)
 {
-    char b[160];
+    char b[256];
 
-    sprintf(b, "DBG,CONFIG,buffer=%u,post=%u,pre=%u,rate_hz=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u\r\n",
+    sprintf(b, "DBG,CONFIG,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u\r\n",
             (unsigned)BUFFER_SIZE,
             (unsigned)POST_TRIGGER,
             (unsigned)PRE_TRIGGER,
+            (unsigned long)SAMPLE_CLOCK_HZ,
+            (unsigned long)TIMER_PERIOD_CYCLES,
             (unsigned long)SAMPLE_RATE_HZ,
+            (unsigned long)SAMPLE_PERIOD_NS,
             (unsigned long)PREFILL_MS,
             (unsigned long)ARM_TIMEOUT_MS,
             TRIGGER_OFFSET,
@@ -105,7 +132,7 @@ static void debug_config(void)
             (unsigned)TRIGGER1_LEVEL,
             (unsigned)USE_TEST_PWM,
             (unsigned)BRINGUP_TEST);
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 }
 
 
@@ -115,7 +142,7 @@ static void dma_setup(void)
 {
     char b[128];
 
-    UARTDebug_PutString("DBG,DMA,begin\r\n");
+    DebugUART_PutString("DBG,DMA,begin\r\n");
 
     ch0 = DMA0_DmaInitialize(2, 1, HI16(CYDEV_PERIPH_BASE), HI16(CYDEV_SRAM_BASE));
     ch1 = DMA1_DmaInitialize(2, 1, HI16(CYDEV_PERIPH_BASE), HI16(CYDEV_SRAM_BASE));
@@ -147,7 +174,7 @@ static void dma_setup(void)
             (unsigned)(BUFFER_SIZE * sizeof(uint16_t)),
             (unsigned)LO16((uint32)ring0),
             (unsigned)LO16((uint32)ring1));
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 }
 
 static uint16_t dma_destination(uint8_t ch)
@@ -186,7 +213,7 @@ static uint16_t last_sample_index(uint8_t ch, const uint16_t *ring)
             (unsigned)bytes,
             (unsigned)next,
             (unsigned)last);
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 
     return last;
 }
@@ -218,7 +245,94 @@ static void timing_diagnostics(void)
             (unsigned)end1,
             (unsigned)delta1,
             (unsigned long)((SAMPLE_RATE_HZ * RATE_TEST_WINDOW_MS) / 1000u));
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
+}
+
+static uint8_t usb_cdc_initialized;
+
+static void app_usb_start(void)
+{
+    USBUART_Start(0, USBUART_5V_OPERATION);
+    DebugUART_PutString("DBG,INIT,USBUART=started\r\n");
+}
+
+static uint8_t app_usb_service(void)
+{
+    uint8_t configuration = USBUART_GetConfiguration();
+
+    if (configuration == 0u)
+    {
+        if (usb_cdc_initialized != 0u)
+        {
+            DebugUART_PutString("DBG,USB,disconnected\r\n");
+        }
+        usb_cdc_initialized = 0u;
+        return 0u;
+    }
+
+    if (usb_cdc_initialized == 0u)
+    {
+        if (USBUART_CDC_Init() != 0u)
+        {
+            usb_cdc_initialized = 1u;
+            DebugUART_PutString("DBG,USB,cdc=ready\r\n");
+        }
+    }
+
+    return usb_cdc_initialized;
+}
+
+static uint8_t app_usb_wait_ready(void)
+{
+    uint32_t waited_ms = 0u;
+
+    if (app_usb_service() == 0u)
+    {
+        return 0u;
+    }
+
+    while (USBUART_CDCIsReady() == 0u)
+    {
+        if (waited_ms >= APP_USB_TX_TIMEOUT_MS)
+        {
+            return 0u;
+        }
+
+        CyDelay(1u);
+        waited_ms++;
+
+        if (app_usb_service() == 0u)
+        {
+            return 0u;
+        }
+    }
+
+    return 1u;
+}
+
+static uint8_t app_usb_send_bytes(const uint8_t *data, uint16_t length)
+{
+    uint16_t chunk;
+
+    while (length != 0u)
+    {
+        if (app_usb_wait_ready() == 0u)
+        {
+            return 0u;
+        }
+
+        chunk = (length > APP_USB_TX_CHUNK_SIZE) ? APP_USB_TX_CHUNK_SIZE : length;
+        USBUART_PutData(data, chunk);
+        data += chunk;
+        length -= chunk;
+    }
+
+    return 1u;
+}
+
+static uint8_t app_usb_send_text(const char *text)
+{
+    return app_usb_send_bytes((const uint8_t *)text, (uint16_t)strlen(text));
 }
 #endif
 
@@ -232,7 +346,7 @@ static void clear_latches(void)
 
     TrigEnable_Write(CTL_CLEAR);
     debug_status("clear-asserted", 0u, TrigBits_Read());
-    CyDelayUs(5);                   /* hardware needs a few TriggerClock cycles */
+    CyDelayUs(5);                   /* hardware needs a few BUS_CLK cycles */
     TrigEnable_Write(0u);
     PWM_Sample_Buffer_WriteCounter(POST_TRIGGER);
 
@@ -319,7 +433,7 @@ static uint8_t capture(uint16_t *last0, uint16_t *last1, uint8_t *final_status)
                 (unsigned)done_dma_index,
                 (unsigned)ring_distance(trigger_dma_index, done_dma_index),
                 (unsigned)POST_TRIGGER);
-        UARTDebug_PutString(b);
+    DebugUART_PutString(b);
     }
 #endif
 
@@ -337,7 +451,7 @@ static uint8_t capture(uint16_t *last0, uint16_t *last1, uint8_t *final_status)
 
 /* ---------------- Output ---------------- */
 
-static void send_capture(uint16_t last0, uint16_t last1)
+static uint8_t send_capture(uint32_t capture_number, uint16_t last0, uint16_t last1, uint8_t status)
 {
     char buf[112];
     uint16_t start = (uint16_t)((last0 + 1u + BUFFER_SIZE + TRIGGER_OFFSET)
@@ -349,31 +463,176 @@ static void send_capture(uint16_t last0, uint16_t last1)
             (unsigned)last1,
             (unsigned)PRE_TRIGGER,
             TRIGGER_OFFSET);
-    UARTDebug_PutString(buf);
+    DebugUART_PutString(buf);
 
     if (last0 != last1)
     {
-        UARTDebug_PutString("DBG,WARNING,channel_indices_differ\r\n");
+        DebugUART_PutString("DBG,WARNING,channel_indices_differ\r\n");
     }
 
-    UARTDebug_PutString("CAPTURE\r\n");
+    if (app_usb_send_text("CAPTURE,BEGIN\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,VERSION,%u\r\n", (unsigned)APP_PROTOCOL_VERSION);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,CAPTURE_NUMBER,%lu\r\n", (unsigned long)capture_number);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    if (app_usb_send_text("META,FORMAT,CSV16_ADC_COUNTS\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    if (app_usb_send_text("META,CHANNEL_COUNT,2\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_COUNT,%u\r\n", (unsigned)BUFFER_SIZE);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,ADC_BITS,%u\r\n", (unsigned)ADC_BITS);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_CLOCK_HZ,%lu\r\n", (unsigned long)SAMPLE_CLOCK_HZ);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TIMER_PERIOD_CYCLES,%lu\r\n", (unsigned long)TIMER_PERIOD_CYCLES);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_RATE_HZ,%lu\r\n", (unsigned long)SAMPLE_RATE_HZ);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,SAMPLE_PERIOD_NS,%lu\r\n", (unsigned long)SAMPLE_PERIOD_NS);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,PRE_TRIGGER,%u\r\n", (unsigned)PRE_TRIGGER);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,POST_TRIGGER,%u\r\n", (unsigned)POST_TRIGGER);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER_INDEX,%u\r\n", (unsigned)PRE_TRIGGER);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER_OFFSET,%d\r\n", TRIGGER_OFFSET);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER0_LEVEL,%u\r\n", (unsigned)TRIGGER0_LEVEL);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,TRIGGER1_LEVEL,%u\r\n", (unsigned)TRIGGER1_LEVEL);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,STATUS,%u\r\n", (unsigned)status);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,END_INDEX0,%u\r\n", (unsigned)last0);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,END_INDEX1,%u\r\n", (unsigned)last1);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,DATA_START_INDEX,%u\r\n", (unsigned)start);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    sprintf(buf, "META,DATA_ROWS,%u\r\n", (unsigned)BUFFER_SIZE);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
 
     sprintf(buf, "TRIGGER_INDEX,%u\r\n", (unsigned)PRE_TRIGGER);
-    UARTDebug_PutString(buf);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
 
-    /* If these two differ, the channels are out of step. */
     sprintf(buf, "IDX,%u,%u\r\n", (unsigned)last0, (unsigned)last1);
-    UARTDebug_PutString(buf);
+    if (app_usb_send_text(buf) == 0u)
+    {
+        return 0u;
+    }
+
+    if (app_usb_send_text("DATA\r\n") == 0u)
+    {
+        return 0u;
+    }
 
     for (uint16_t i = 0; i < BUFFER_SIZE; i++)
     {
         uint16_t src = (uint16_t)((start + i) % BUFFER_SIZE);
         sprintf(buf, "%u,%u\r\n", (unsigned)ring0[src], (unsigned)ring1[src]);
-        UARTDebug_PutString(buf);
+        if (app_usb_send_text(buf) == 0u)
+        {
+            return 0u;
+        }
     }
 
-    UARTDebug_PutString("END\r\n");
-    UARTDebug_PutString("DBG,OUTPUT,complete\r\n");
+    if (app_usb_send_text("CAPTURE,END\r\n") == 0u)
+    {
+        return 0u;
+    }
+
+    DebugUART_PutString("DBG,OUTPUT,complete\r\n");
+    return 1u;
 }
 
 
@@ -397,7 +656,7 @@ static void bringup(void)
     status = TrigBits_Read();
     debug_status("bringup-clear", 50u, status);
     sprintf(b, "BU clear sr=0x%02X\r\n", (unsigned)status);
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 
     TrigEnable_Write(CTL_ARM);
     status = TrigBits_Read();
@@ -430,7 +689,7 @@ static void bringup(void)
     debug_status("bringup-trigger-result", t_trig, status);
     sprintf(b, "BU trig after %lu ms sr=0x%02X\r\n",
             (unsigned long)t_trig, (unsigned)status);
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 
     for (ms = 0; ms < 5000u; ms++)
     {
@@ -457,7 +716,7 @@ static void bringup(void)
     debug_status("bringup-done-result", t_trig + ms, status);
     sprintf(b, "BU done after %lu ms more sr=0x%02X\r\n",
             (unsigned long)ms, (unsigned)status);
-    UARTDebug_PutString(b);
+    DebugUART_PutString(b);
 
     TrigEnable_Write(0u);
     debug_status("bringup-disarmed", t_trig + ms, TrigBits_Read());
@@ -474,19 +733,21 @@ int main(void)
 
     CyGlobalIntEnable;
 
-    UARTDebug_Start();
-    UARTDebug_PutString("START\r\n");
-    UARTDebug_PutString("DBG,INIT,UARTDebug=started\r\n");
+    DebugUART_Start();
+    DebugUART_PutString("START\r\n");
+    DebugUART_PutString("DBG,INIT,DebugUART=started\r\n");
+    app_usb_start();
+    app_usb_service();
     debug_config();
 
 #if USE_TEST_PWM
     PWM_1_Start();
-    UARTDebug_PutString("DBG,INIT,PWM_1=started\r\n");
+    DebugUART_PutString("DBG,INIT,PWM_1=started\r\n");
 #endif
 
     ADC0_Start();
     ADC1_Start();
-    UARTDebug_PutString("DBG,INIT,ADCs=started\r\n");
+    DebugUART_PutString("DBG,INIT,ADCs=started\r\n");
 
     TriggerDAC0_Start();
     TriggerDAC1_Start();
@@ -497,7 +758,7 @@ int main(void)
     sprintf(dbg, "DBG,INIT,trigger_path=started,levels=%u,%u\r\n",
             (unsigned)TRIGGER0_LEVEL,
             (unsigned)TRIGGER1_LEVEL);
-    UARTDebug_PutString(dbg);
+    DebugUART_PutString(dbg);
 
     PWM_Sample_Buffer_Start();
     PWM_Sample_Buffer_WritePeriod(POST_TRIGGER);
@@ -505,18 +766,18 @@ int main(void)
     sprintf(dbg, "DBG,INIT,post_trigger_pwm=started,period=%u,counter=%u\r\n",
             (unsigned)POST_TRIGGER,
             (unsigned)POST_TRIGGER);
-    UARTDebug_PutString(dbg);
+    DebugUART_PutString(dbg);
 
     dma_setup();
 
     Timer_Start();      /* starts the sampling */
-    UARTDebug_PutString("DBG,INIT,Timer=started\r\n");
+    DebugUART_PutString("DBG,INIT,Timer=started\r\n");
 #if TIMING_DIAGNOSTICS
     timing_diagnostics();
 #endif
     debug_status("init-ready", 0u, TrigBits_Read());
 
-    UARTDebug_PutString("READY\r\n");
+    DebugUART_PutString("READY\r\n");
 
 #if BRINGUP_TEST
     bringup();
@@ -527,30 +788,34 @@ int main(void)
         uint16_t last0 = 0, last1 = 0;
         uint8_t  st = 0;
 
+        app_usb_service();
         capture_number++;
         sprintf(dbg, "DBG,CYCLE,n=%lu,sr=0x%02X,ctl=0x%02X\r\n",
                 (unsigned long)capture_number,
                 (unsigned)TrigBits_Read(),
                 (unsigned)TrigEnable_Read());
-        UARTDebug_PutString(dbg);
-        UARTDebug_PutString("ARMING\r\n");
+        DebugUART_PutString(dbg);
+        DebugUART_PutString("ARMING\r\n");
 
         if (capture(&last0, &last1, &st))
         {
             sprintf(dbg, "DBG,CYCLE,n=%lu,result=success,status=0x%02X\r\n",
                     (unsigned long)capture_number,
                     (unsigned)st);
-            UARTDebug_PutString(dbg);
-            send_capture(last0, last1);
+            DebugUART_PutString(dbg);
+            if (send_capture(capture_number, last0, last1, st) == 0u)
+            {
+                DebugUART_PutString("DBG,APP,capture_send=failed\r\n");
+            }
         }
         else
         {
             sprintf(dbg, "DBG,CYCLE,n=%lu,result=timeout,status=0x%02X\r\n",
                     (unsigned long)capture_number,
                     (unsigned)st);
-            UARTDebug_PutString(dbg);
+            DebugUART_PutString(dbg);
             sprintf(dbg, "TIMEOUT,sr=0x%02X\r\n", (unsigned)st);
-            UARTDebug_PutString(dbg);
+            DebugUART_PutString(dbg);
         }
 
         CyDelay(500);
