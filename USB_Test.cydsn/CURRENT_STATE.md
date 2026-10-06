@@ -10,6 +10,16 @@ Last verified: 2026-10-06
 - `DebugUART` is diagnostic-only. `USBUART` is the application communication path.
 - `Proper_Capture_Test.cydsn` contains the earlier capture implementation and protocol notes; `USB_Test.cydsn` is the active USB communication project.
 
+## Feature Architecture
+
+- `main.c` is now only the composition root: it enables interrupts, initializes communication, selects the active feature, and runs the common service loop.
+- `features/feature.h` defines the small class-like `FeatureModule` contract: `name`, `init`, and cooperative `service` callbacks.
+- `features/feature_registry.c` selects the active module from `features/feature_config.h`.
+- `features/oscilloscope/` owns scope configuration, ADC/DMA setup, trigger control, capture timing, bring-up diagnostics, and capture output.
+- `features/usb_test/` owns the repeating USB transport test mode.
+- A future logic analyzer belongs in `features/logic_analyzer/` and should implement the same module contract rather than expanding `main.c`.
+- Generated PSoC component code remains outside the feature modules and is accessed only by the feature that owns the corresponding hardware path.
+
 ## Verified USB State
 
 - USB CDC enumerates successfully.
@@ -137,6 +147,11 @@ The current ADC and timer limits have not been characterized by an automated rat
 - `USB_Test.cydsn/main.c` - capture setup, timing metadata, diagnostics, and test-mode selection.
 - `USB_Test.cydsn/app_comm.c` - USB initialization, bounded CDC transfer, test frame, and capture framing.
 - `USB_Test.cydsn/app_comm.h` - capture metadata structure and communication API.
+- `USB_Test.cydsn/features/feature.h` - common feature-module interface.
+- `USB_Test.cydsn/features/feature_config.h` - active feature selection.
+- `USB_Test.cydsn/features/feature_registry.c` - active feature registry.
+- `USB_Test.cydsn/features/oscilloscope/` - oscilloscope feature implementation.
+- `USB_Test.cydsn/features/usb_test/` - USB transport test implementation.
 - `USB_Test.cydsn/Generated_Source/PSoC5/Timer.h` - generated timer period.
 - `USB_Test.cydsn/Generated_Source/PSoC5/ADC0.h` and `ADC1.h` - generated ADC timing settings.
 - `USB_Test.cydsn/Generated_Source/PSoC5/USBUART_descr.c` - generated USB descriptor used to verify the product string.
