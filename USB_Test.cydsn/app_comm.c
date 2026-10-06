@@ -14,6 +14,7 @@
 #define APP_USB_ERROR_NONE       0u
 #define APP_USB_ERROR_NO_CDC     1u
 #define APP_USB_ERROR_TX_TIMEOUT 2u
+#define APP_USB_ERROR_MODE_CHANGE 3u
 
 #if defined(UARTDebug_TX_BUFFER_SIZE) && !defined(DebugUART_TX_BUFFER_SIZE)
 #define DebugUART_Start       UARTDebug_Start
@@ -88,6 +89,12 @@ static uint8_t app_usb_wait_ready(void)
     uint32_t waited_ms = 0u;
 
     AppComm_Service();
+    if (app_mode_request_pending != 0u)
+    {
+        usb_last_error = APP_USB_ERROR_MODE_CHANGE;
+        return 0u;
+    }
+
     if (usb_cdc_initialized == 0u)
     {
         usb_last_error = APP_USB_ERROR_NO_CDC;
@@ -106,6 +113,12 @@ static uint8_t app_usb_wait_ready(void)
         waited_ms++;
 
         AppComm_Service();
+        if (app_mode_request_pending != 0u)
+        {
+            usb_last_error = APP_USB_ERROR_MODE_CHANGE;
+            return 0u;
+        }
+
         if (usb_cdc_initialized == 0u)
         {
             usb_last_error = APP_USB_ERROR_NO_CDC;
@@ -307,6 +320,10 @@ uint8_t AppComm_SendUsbFrame(void)
     else if (usb_last_error == APP_USB_ERROR_TX_TIMEOUT)
     {
         DebugUART_PutString("DBG,USB,send=failed,reason=tx_timeout\r\n");
+    }
+    else if (usb_last_error == APP_USB_ERROR_MODE_CHANGE)
+    {
+        DebugUART_PutString("DBG,USB,send=aborted,reason=mode_change\r\n");
     }
     else
     {

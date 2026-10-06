@@ -32,3 +32,9 @@ CLEAN.log
 *.swo
 .DS_Store
 Thumbs.db
+
+# Python host tools
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
