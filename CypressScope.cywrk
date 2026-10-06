@@ -3,7 +3,7 @@
 <!--This file is machine generated and read. It is not intended to be edited by hand.-->
 <!--Due to this, there is no schema for this file.-->
 <CyGuid_2867d519-54d2-4c01-9830-c51cb08bc3dd type_name="CyDesigner.Common.ProjMgmt.Model.CyPrjMgmtWorkspaceSerialize" version="5" xml_contents_version="3" name="CypressScope" persistent="CypressScope.cywrk" platform="NOT_USED">
-<current_project name=".\USB_Test.cydsn\USB_Test.cyprj" />
+<current_project name=".\APP_Communication_Test.cydsn\APP_Communication_Test.cyprj" />
 <wrkspc_folders />
 <files />
 <projects>
@@ -17,6 +17,7 @@
 <v>.\CyScope\ScopePSoC\Scope.cydsn\Scope.cyprj</v>
 <v>.\Proper_Capture_Test.cydsn\Proper_Capture_Test.cyprj</v>
 <v>.\USB_Test.cydsn\USB_Test.cyprj</v>
+<v>.\APP_Communication_Test.cydsn\APP_Communication_Test.cyprj</v>
 </projects>
 <workspace_id v="f9d54cae-b4c6-4491-a12b-53de1f8cead7" />
 <WriteAppVersionLastSavedWith v="4.4.0.80" />

@@ -1,0 +1,8 @@
+#ifndef FEATURE_CONFIG_H
+#define FEATURE_CONFIG_H
+
+#ifndef FEATURE_USB_INTERVAL_MS
+#define FEATURE_USB_INTERVAL_MS     1000u
+#endif
+
+#endif
