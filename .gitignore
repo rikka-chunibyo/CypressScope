@@ -1,0 +1,34 @@
+# PSoC Creator generated source and build directories
+**/codegentemp/
+**/Generated_Source/
+**/CortexM3/
+**/Export/
+
+# PSoC Creator build logs, reports, and generated metadata
+BUILD.log
+CLEAN.log
+*.log
+*.rpt
+*_timing.html
+*.cycdx
+*.cyfit
+*.svd
+*.nyxri
+
+# Compiler and programming output
+*.a
+*.elf
+*.hex
+*.lst
+*.map
+*.o
+
+# Local backups and editor/OS noise
+**/Backup/
+*.Greg
+*~
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
