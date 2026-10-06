@@ -26,7 +26,7 @@
 #define POST_TRIGGER        750u    /* samples kept after the trigger        */
 #define PRE_TRIGGER         (BUFFER_SIZE - POST_TRIGGER)
 
-#define SAMPLE_RATE_HZ      1000u   /* must match Timer period (1 MHz / 1000) */
+#define SAMPLE_RATE_HZ      24024u   /* must match Timer period (1 MHz / 1000) */
 
 #define TRIGGER0_LEVEL      156u    /* VDAC code, 16 mV per code (156 = 2.5 V) */
 #define TRIGGER1_LEVEL      156u
