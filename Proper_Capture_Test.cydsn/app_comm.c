@@ -23,6 +23,50 @@
 
 static uint8_t usb_cdc_initialized;
 
+static const char app_usb_test_frame[] =
+    "CAPTURE,BEGIN\r\n"
+    "META,VERSION,1\r\n"
+    "META,CAPTURE_NUMBER,0\r\n"
+    "META,FORMAT,CSV16_ADC_COUNTS\r\n"
+    "META,CHANNEL_COUNT,2\r\n"
+    "META,SAMPLE_COUNT,16\r\n"
+    "META,ADC_BITS,12\r\n"
+    "META,SAMPLE_CLOCK_HZ,24000000\r\n"
+    "META,TIMER_PERIOD_CYCLES,999\r\n"
+    "META,SAMPLE_RATE_HZ,24024\r\n"
+    "META,SAMPLE_PERIOD_NS,41625\r\n"
+    "META,PRE_TRIGGER,8\r\n"
+    "META,POST_TRIGGER,8\r\n"
+    "META,TRIGGER_INDEX,8\r\n"
+    "META,TRIGGER_OFFSET,0\r\n"
+    "META,TRIGGER0_LEVEL,156\r\n"
+    "META,TRIGGER1_LEVEL,156\r\n"
+    "META,STATUS,13\r\n"
+    "META,END_INDEX0,15\r\n"
+    "META,END_INDEX1,15\r\n"
+    "META,DATA_START_INDEX,0\r\n"
+    "META,DATA_ROWS,16\r\n"
+    "TRIGGER_INDEX,8\r\n"
+    "IDX,15,15\r\n"
+    "DATA\r\n"
+    "0,100\r\n"
+    "1,101\r\n"
+    "2,102\r\n"
+    "3,103\r\n"
+    "4,104\r\n"
+    "5,105\r\n"
+    "6,106\r\n"
+    "7,107\r\n"
+    "8,108\r\n"
+    "9,109\r\n"
+    "10,110\r\n"
+    "11,111\r\n"
+    "12,112\r\n"
+    "13,113\r\n"
+    "14,114\r\n"
+    "15,115\r\n"
+    "CAPTURE,END\r\n";
+
 static uint8_t app_usb_wait_ready(void)
 {
     uint32_t waited_ms = 0u;
@@ -116,6 +160,22 @@ void AppComm_Service(void)
 void AppComm_DebugString(const char *text)
 {
     DebugUART_PutString(text);
+}
+
+uint8_t AppComm_SendTestFrame(void)
+{
+    uint8_t result = app_usb_send_text(app_usb_test_frame);
+
+    if (result != 0u)
+    {
+        DebugUART_PutString("DBG,USBTEST,send=ok\r\n");
+    }
+    else
+    {
+        DebugUART_PutString("DBG,USBTEST,send=failed\r\n");
+    }
+
+    return result;
 }
 
 uint8_t AppComm_SendCapture(const AppCommCaptureMetadata *metadata,

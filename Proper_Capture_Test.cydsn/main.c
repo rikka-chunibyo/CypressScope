@@ -47,6 +47,8 @@
 #define BRINGUP_TEST        1       /* run the staged hardware check first  */
 #define TIMING_DIAGNOSTICS  1
 #define RATE_TEST_WINDOW_MS 10u
+#define USB_TEST_MODE       1       /* send a fixed protocol frame over USB */
+#define USB_TEST_INTERVAL_MS 1000u
 
 /* TrigEnable control bits */
 #define CTL_ARM             0x40u
@@ -99,7 +101,7 @@ static void debug_config(void)
 {
     char b[256];
 
-    sprintf(b, "DBG,CONFIG,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u\r\n",
+    sprintf(b, "DBG,CONFIG,buffer=%u,post=%u,pre=%u,clock_hz=%lu,timer_period=%lu,rate_hz=%lu,period_ns=%lu,prefill_ms=%lu,timeout_ms=%lu,offset=%d,trigger0=%u,trigger1=%u,test_pwm=%u,bringup=%u,usb_test=%u,usb_test_interval_ms=%u\r\n",
             (unsigned)BUFFER_SIZE,
             (unsigned)POST_TRIGGER,
             (unsigned)PRE_TRIGGER,
@@ -113,7 +115,9 @@ static void debug_config(void)
             (unsigned)TRIGGER0_LEVEL,
             (unsigned)TRIGGER1_LEVEL,
             (unsigned)USE_TEST_PWM,
-            (unsigned)BRINGUP_TEST);
+            (unsigned)BRINGUP_TEST,
+            (unsigned)USB_TEST_MODE,
+            (unsigned)USB_TEST_INTERVAL_MS);
     AppComm_DebugString(b);
 }
 
@@ -474,6 +478,15 @@ int main(void)
     AppComm_Init();
     debug_config();
 
+#if USB_TEST_MODE
+    AppComm_DebugString("DBG,USBTEST,mode=constant_frame\r\n");
+    for (;;)
+    {
+        AppComm_Service();
+        AppComm_SendTestFrame();
+        CyDelay(USB_TEST_INTERVAL_MS);
+    }
+#else
 #if USE_TEST_PWM
     PWM_1_Start();
     AppComm_DebugString("DBG,INIT,PWM_1=started\r\n");
@@ -554,4 +567,5 @@ int main(void)
 
         CyDelay(500);
     }
+#endif
 }
