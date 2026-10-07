@@ -1,5 +1,6 @@
 #include "project.h"
 #include "app_comm.h"
+#include "features/oscilloscope/oscilloscope.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +40,9 @@ static uint8_t app_command_length;
 static uint8_t app_command_discard;
 static uint8_t app_mode_request_pending;
 static FeatureMode app_requested_mode;
+static uint8_t app_command_packet[APP_COMMAND_PACKET_SIZE];
+static uint8_t app_live_header[APP_LIVE_FRAME_HEADER_SIZE];
+static uint8_t app_live_payload[APP_LIVE_MAX_SAMPLES * 4u];
 
 static const char app_usb_frame[] =
     "CAPTURE,BEGIN\r\n"
@@ -169,10 +173,20 @@ static void app_command_uppercase(char *command)
 
 static void app_command_process(void)
 {
+    unsigned int channel;
+    unsigned int level;
+
     app_command_buffer[app_command_length] = '\0';
     app_command_uppercase(app_command_buffer);
 
-    if (strcmp(app_command_buffer, "MODE USB") == 0)
+    if ((strncmp(app_command_buffer, "TRIGGER ", 8u) == 0) &&
+        (sscanf(&app_command_buffer[8], "%u %u", &channel, &level) == 2) &&
+        (channel <= 1u) && (level <= 255u))
+    {
+        Oscilloscope_SetTriggerLevel((uint8_t)channel, (uint8_t)level);
+        DebugUART_PutString("DBG,COMMAND,trigger=updated\r\n");
+    }
+    else if (strcmp(app_command_buffer, "MODE USB") == 0)
     {
         app_requested_mode = FEATURE_MODE_USB;
         app_mode_request_pending = 1u;
@@ -199,7 +213,6 @@ static void app_command_process(void)
 
 static void app_command_receive(void)
 {
-    uint8_t packet[APP_COMMAND_PACKET_SIZE];
     uint8_t received;
     uint8_t i;
 
@@ -208,10 +221,10 @@ static void app_command_receive(void)
         return;
     }
 
-    received = USBUART_GetAll(packet);
+    received = USBUART_GetAll(app_command_packet);
     for (i = 0u; i < received; i++)
     {
-        if ((packet[i] == '\r') || (packet[i] == '\n'))
+        if ((app_command_packet[i] == '\r') || (app_command_packet[i] == '\n'))
         {
             if ((app_command_discard == 0u) && (app_command_length != 0u))
             {
@@ -220,12 +233,12 @@ static void app_command_receive(void)
             app_command_length = 0u;
             app_command_discard = 0u;
         }
-        else if ((packet[i] >= 0x20u) && (packet[i] <= 0x7Eu))
+        else if ((app_command_packet[i] >= 0x20u) && (app_command_packet[i] <= 0x7Eu))
         {
             if ((app_command_discard == 0u) &&
                 (app_command_length < (APP_COMMAND_BUFFER_SIZE - 1u)))
             {
-                app_command_buffer[app_command_length++] = (char)packet[i];
+                app_command_buffer[app_command_length++] = (char)app_command_packet[i];
             }
             else
             {
@@ -340,8 +353,6 @@ uint8_t AppComm_SendLiveBlock(uint32_t sequence,
                               const uint16_t *channel0,
                               const uint16_t *channel1)
 {
-    uint8_t header[APP_LIVE_FRAME_HEADER_SIZE];
-    uint8_t payload[APP_LIVE_MAX_SAMPLES * 4u];
     uint16_t payload_length;
     uint16_t i;
     uint16_t payload_offset = 0u;
@@ -354,41 +365,41 @@ uint8_t AppComm_SendLiveBlock(uint32_t sequence,
 
     payload_length = (uint16_t)(sample_count * 4u);
 
-    header[0] = 'L';
-    header[1] = 'I';
-    header[2] = 'V';
-    header[3] = 'E';
-    header[4] = 1u;
-    header[5] = 2u;
-    header[6] = (uint8_t)(sample_count & 0x00FFu);
-    header[7] = (uint8_t)((sample_count >> 8) & 0x00FFu);
-    header[8] = (uint8_t)(start_index & 0x00FFu);
-    header[9] = (uint8_t)((start_index >> 8) & 0x00FFu);
-    header[10] = (uint8_t)(sequence & 0x000000FFUL);
-    header[11] = (uint8_t)((sequence >> 8) & 0x000000FFUL);
-    header[12] = (uint8_t)((sequence >> 16) & 0x000000FFUL);
-    header[13] = (uint8_t)((sequence >> 24) & 0x000000FFUL);
-    header[14] = (uint8_t)(sample_rate_hz & 0x000000FFUL);
-    header[15] = (uint8_t)((sample_rate_hz >> 8) & 0x000000FFUL);
-    header[16] = (uint8_t)((sample_rate_hz >> 16) & 0x000000FFUL);
-    header[17] = (uint8_t)((sample_rate_hz >> 24) & 0x000000FFUL);
-    header[18] = (uint8_t)(payload_length & 0x00FFu);
-    header[19] = (uint8_t)((payload_length >> 8) & 0x00FFu);
+    app_live_header[0] = 'L';
+    app_live_header[1] = 'I';
+    app_live_header[2] = 'V';
+    app_live_header[3] = 'E';
+    app_live_header[4] = 1u;
+    app_live_header[5] = 2u;
+    app_live_header[6] = (uint8_t)(sample_count & 0x00FFu);
+    app_live_header[7] = (uint8_t)((sample_count >> 8) & 0x00FFu);
+    app_live_header[8] = (uint8_t)(start_index & 0x00FFu);
+    app_live_header[9] = (uint8_t)((start_index >> 8) & 0x00FFu);
+    app_live_header[10] = (uint8_t)(sequence & 0x000000FFUL);
+    app_live_header[11] = (uint8_t)((sequence >> 8) & 0x000000FFUL);
+    app_live_header[12] = (uint8_t)((sequence >> 16) & 0x000000FFUL);
+    app_live_header[13] = (uint8_t)((sequence >> 24) & 0x000000FFUL);
+    app_live_header[14] = (uint8_t)(sample_rate_hz & 0x000000FFUL);
+    app_live_header[15] = (uint8_t)((sample_rate_hz >> 8) & 0x000000FFUL);
+    app_live_header[16] = (uint8_t)((sample_rate_hz >> 16) & 0x000000FFUL);
+    app_live_header[17] = (uint8_t)((sample_rate_hz >> 24) & 0x000000FFUL);
+    app_live_header[18] = (uint8_t)(payload_length & 0x00FFu);
+    app_live_header[19] = (uint8_t)((payload_length >> 8) & 0x00FFu);
 
     for (i = 0u; i < sample_count; i++)
     {
-        payload[payload_offset++] = (uint8_t)(channel0[i] & 0x00FFu);
-        payload[payload_offset++] = (uint8_t)((channel0[i] >> 8) & 0x00FFu);
-        payload[payload_offset++] = (uint8_t)(channel1[i] & 0x00FFu);
-        payload[payload_offset++] = (uint8_t)((channel1[i] >> 8) & 0x00FFu);
+        app_live_payload[payload_offset++] = (uint8_t)(channel0[i] & 0x00FFu);
+        app_live_payload[payload_offset++] = (uint8_t)((channel0[i] >> 8) & 0x00FFu);
+        app_live_payload[payload_offset++] = (uint8_t)(channel1[i] & 0x00FFu);
+        app_live_payload[payload_offset++] = (uint8_t)((channel1[i] >> 8) & 0x00FFu);
     }
 
-    if (app_usb_send_bytes(header, APP_LIVE_FRAME_HEADER_SIZE) == 0u)
+    if (app_usb_send_bytes(app_live_header, APP_LIVE_FRAME_HEADER_SIZE) == 0u)
     {
         return 0u;
     }
 
-    return app_usb_send_bytes(payload, payload_length);
+    return app_usb_send_bytes(app_live_payload, payload_length);
 }
 
 uint8_t AppComm_SendCapture(const AppCommCaptureMetadata *metadata,

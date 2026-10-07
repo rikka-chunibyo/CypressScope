@@ -1,7 +1,8 @@
-# CypressScope Live Viewer
+# CypressScope Viewer
 
-This small test application opens the USB CDC serial port, sends MODE LIVE,
-parses the binary LIVE frames, and graphs both ADC channels.
+This small application opens the USB CDC serial port and graphs both ADC
+channels. Trigger mode is the current test path; live mode remains available
+for the future continuous binary stream.
 
 ## Install
 
@@ -9,14 +10,26 @@ parses the binary LIVE frames, and graphs both ADC channels.
 
 ## Run
 
-    python host\live_viewer.py --list-ports
-    python host\live_viewer.py COM10
+    python host\viewer.py --list-ports
+    python host\viewer.py COM10
+
+The default mode sends `MODE SCOPE`, parses the triggered ASCII capture, and
+plots the samples around the trigger index. Select the future binary stream
+explicitly with:
+
+    python host\viewer.py COM10 --mode live
+
+In trigger mode, edit either trigger box in the plot and press Enter to send
+the new VDAC code to the device. The range is `0` through `255`. Trigger
+levels can also be set at startup:
+
+    python host\viewer.py COM10 --trigger0 156 --trigger1 156
 
 The USB CDC baud rate is normally ignored by the device, but the viewer uses
 115200 by default for serial-driver compatibility. Use --no-command if the
 firmware is already streaming live data.
 
-    python host\live_viewer.py COM10 --no-command --window 8192
+    python host\viewer.py COM10 --mode live --no-command --window 8192
 
 ## Protocol
 
@@ -37,8 +50,15 @@ The payload contains rows of two unsigned 16-bit little-endian ADC values:
 channel0, channel1. A terminal will display these binary bytes as garbage;
 that is expected.
 
-## Parser Test
+## Parser Tests
 
-Run the protocol parser without hardware:
+Run both protocol parsers without hardware:
 
-    python host\live_viewer.py --self-test
+    python host\viewer.py --self-test
+
+## Commands
+
+The firmware accepts these runtime trigger commands over USB CDC:
+
+    TRIGGER 0 156
+    TRIGGER 1 156

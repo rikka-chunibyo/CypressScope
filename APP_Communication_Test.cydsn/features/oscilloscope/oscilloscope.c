@@ -46,6 +46,9 @@ static uint8_t oscilloscope_dma_td0;
 static uint8_t oscilloscope_dma_td1;
 static uint8_t oscilloscope_dma_configured;
 static uint32_t oscilloscope_capture_number;
+static uint8_t oscilloscope_trigger0_level = OSCILLOSCOPE_TRIGGER0_LEVEL;
+static uint8_t oscilloscope_trigger1_level = OSCILLOSCOPE_TRIGGER1_LEVEL;
+static uint8_t oscilloscope_hardware_active;
 static uint16_t oscilloscope_live_block0[OSCILLOSCOPE_LIVE_BLOCK_SAMPLES];
 static uint16_t oscilloscope_live_block1[OSCILLOSCOPE_LIVE_BLOCK_SAMPLES];
 static uint16_t oscilloscope_live_next_index;
@@ -54,6 +57,9 @@ static uint32_t oscilloscope_live_blocks_sent;
 static uint32_t oscilloscope_live_overruns;
 static uint32_t oscilloscope_live_copy_failures;
 static uint32_t oscilloscope_live_send_failures;
+static uint8_t oscilloscope_live_service_logged;
+static uint8_t oscilloscope_live_position_logged;
+static char oscilloscope_live_debug[160];
 
 static void oscilloscope_debug_status(const char *stage, uint32_t elapsed_ms, uint8_t status)
 {
@@ -93,12 +99,47 @@ void Oscilloscope_ReportConfig(void)
             (unsigned long)OSCILLOSCOPE_PREFILL_MS,
             (unsigned long)OSCILLOSCOPE_ARM_TIMEOUT_MS,
             OSCILLOSCOPE_TRIGGER_OFFSET,
-            (unsigned)OSCILLOSCOPE_TRIGGER0_LEVEL,
-            (unsigned)OSCILLOSCOPE_TRIGGER1_LEVEL,
+            (unsigned)oscilloscope_trigger0_level,
+            (unsigned)oscilloscope_trigger1_level,
             (unsigned)OSCILLOSCOPE_USE_TEST_PWM,
             (unsigned)OSCILLOSCOPE_BRINGUP_TEST,
             (unsigned)FEATURE_USB_INTERVAL_MS);
     AppComm_DebugString(b);
+}
+
+void Oscilloscope_SetTriggerLevel(uint8_t channel, uint8_t level)
+{
+    if (channel == 0u)
+    {
+        oscilloscope_trigger0_level = level;
+        if (oscilloscope_hardware_active != 0u)
+        {
+            TriggerDAC0_SetValue(level);
+        }
+    }
+    else if (channel == 1u)
+    {
+        oscilloscope_trigger1_level = level;
+        if (oscilloscope_hardware_active != 0u)
+        {
+            TriggerDAC1_SetValue(level);
+        }
+    }
+}
+
+uint8_t Oscilloscope_GetTriggerLevel(uint8_t channel)
+{
+    if (channel == 0u)
+    {
+        return oscilloscope_trigger0_level;
+    }
+
+    if (channel == 1u)
+    {
+        return oscilloscope_trigger1_level;
+    }
+
+    return 0u;
 }
 
 static void oscilloscope_dma_setup(void)
@@ -346,8 +387,8 @@ static uint8_t oscilloscope_send_capture(uint16_t last0, uint16_t last1, uint8_t
     metadata.timer_period_cycles = OSCILLOSCOPE_TIMER_PERIOD_CYCLES;
     metadata.sample_rate_hz = OSCILLOSCOPE_SAMPLE_RATE_HZ;
     metadata.sample_period_ns = OSCILLOSCOPE_SAMPLE_PERIOD_NS;
-    metadata.trigger0_level = OSCILLOSCOPE_TRIGGER0_LEVEL;
-    metadata.trigger1_level = OSCILLOSCOPE_TRIGGER1_LEVEL;
+    metadata.trigger0_level = oscilloscope_trigger0_level;
+    metadata.trigger1_level = oscilloscope_trigger1_level;
 
     return AppComm_SendCapture(&metadata, oscilloscope_ring0, oscilloscope_ring1);
 }
@@ -453,13 +494,14 @@ static void oscilloscope_initialize_hardware(uint8_t live_mode)
 
     TriggerDAC0_Start();
     TriggerDAC1_Start();
-    TriggerDAC0_SetValue(OSCILLOSCOPE_TRIGGER0_LEVEL);
-    TriggerDAC1_SetValue(OSCILLOSCOPE_TRIGGER1_LEVEL);
+    TriggerDAC0_SetValue(oscilloscope_trigger0_level);
+    TriggerDAC1_SetValue(oscilloscope_trigger1_level);
     TriggerCMP0_Start();
     TriggerCMP1_Start();
+    oscilloscope_hardware_active = 1u;
     sprintf(dbg, "DBG,INIT,trigger_path=started,levels=%u,%u\r\n",
-            (unsigned)OSCILLOSCOPE_TRIGGER0_LEVEL,
-            (unsigned)OSCILLOSCOPE_TRIGGER1_LEVEL);
+            (unsigned)oscilloscope_trigger0_level,
+            (unsigned)oscilloscope_trigger1_level);
     AppComm_DebugString(dbg);
 
     PWM_Sample_Buffer_Start();
@@ -537,6 +579,8 @@ static void oscilloscope_live_init(void)
     oscilloscope_live_overruns = 0u;
     oscilloscope_live_copy_failures = 0u;
     oscilloscope_live_send_failures = 0u;
+    oscilloscope_live_service_logged = 0u;
+    oscilloscope_live_position_logged = 0u;
 
     oscilloscope_initialize_hardware(1u);
     last0 = oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0);
@@ -545,11 +589,19 @@ static void oscilloscope_live_init(void)
 
 static void oscilloscope_live_service(void)
 {
-    uint16_t last0 = oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0);
-    uint16_t last1 = oscilloscope_dma_last_index(oscilloscope_dma_ch1, oscilloscope_ring1);
+    uint16_t last0;
+    uint16_t last1;
     uint16_t write_index;
     uint16_t available;
-    char b[160];
+
+    if (oscilloscope_live_service_logged == 0u)
+    {
+        AppComm_DebugString("DBG,LIVE,service=entered\r\n");
+        oscilloscope_live_service_logged = 1u;
+    }
+
+    last0 = oscilloscope_dma_last_index(oscilloscope_dma_ch0, oscilloscope_ring0);
+    last1 = oscilloscope_dma_last_index(oscilloscope_dma_ch1, oscilloscope_ring1);
 
     if (last0 != last1)
     {
@@ -558,6 +610,18 @@ static void oscilloscope_live_service(void)
 
     write_index = (uint16_t)((last0 + 1u) % OSCILLOSCOPE_BUFFER_SIZE);
     available = oscilloscope_ring_distance(oscilloscope_live_next_index, write_index);
+
+    if (oscilloscope_live_position_logged == 0u)
+    {
+        sprintf(oscilloscope_live_debug,
+                "DBG,LIVE,position=read,last0=%u,last1=%u,next=%u,available=%u\r\n",
+                (unsigned)last0,
+                (unsigned)last1,
+                (unsigned)oscilloscope_live_next_index,
+                (unsigned)available);
+        AppComm_DebugString(oscilloscope_live_debug);
+        oscilloscope_live_position_logged = 1u;
+    }
 
     if (available > (OSCILLOSCOPE_BUFFER_SIZE - OSCILLOSCOPE_LIVE_BLOCK_SAMPLES))
     {
@@ -580,6 +644,11 @@ static void oscilloscope_live_service(void)
         return;
     }
 
+    if (oscilloscope_live_blocks_sent == 0u)
+    {
+        AppComm_DebugString("DBG,LIVE,first_send=begin\r\n");
+    }
+
     if (AppComm_SendLiveBlock(oscilloscope_live_sequence,
                               oscilloscope_live_next_index,
                               OSCILLOSCOPE_LIVE_BLOCK_SAMPLES,
@@ -588,23 +657,31 @@ static void oscilloscope_live_service(void)
                               oscilloscope_live_block1) == 0u)
     {
         oscilloscope_live_send_failures++;
+        if (oscilloscope_live_send_failures == 1u)
+        {
+            AppComm_DebugString("DBG,LIVE,first_send=failed\r\n");
+        }
         return;
     }
 
     oscilloscope_live_sequence++;
     oscilloscope_live_blocks_sent++;
+    if (oscilloscope_live_blocks_sent == 1u)
+    {
+        AppComm_DebugString("DBG,LIVE,first_send=ok\r\n");
+    }
     oscilloscope_live_next_index = (uint16_t)((oscilloscope_live_next_index +
                                                OSCILLOSCOPE_LIVE_BLOCK_SAMPLES) %
                                               OSCILLOSCOPE_BUFFER_SIZE);
 
     if ((oscilloscope_live_blocks_sent % OSCILLOSCOPE_LIVE_STATUS_BLOCKS) == 0u)
     {
-        sprintf(b, "DBG,LIVE,blocks=%lu,overruns=%lu,copy_failures=%lu,send_failures=%lu\r\n",
+        sprintf(oscilloscope_live_debug, "DBG,LIVE,blocks=%lu,overruns=%lu,copy_failures=%lu,send_failures=%lu\r\n",
                 (unsigned long)oscilloscope_live_blocks_sent,
                 (unsigned long)oscilloscope_live_overruns,
                 (unsigned long)oscilloscope_live_copy_failures,
                 (unsigned long)oscilloscope_live_send_failures);
-        AppComm_DebugString(b);
+        AppComm_DebugString(oscilloscope_live_debug);
     }
 }
 
@@ -649,6 +726,7 @@ static void oscilloscope_service(void)
 
 static void oscilloscope_stop(void)
 {
+    oscilloscope_hardware_active = 0u;
     TrigEnable_Write(0u);
     Timer_Stop();
     CyDmaChDisable(oscilloscope_dma_ch0);
